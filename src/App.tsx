@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import AuthModal from "./components/AuthModal";
 import MyProjectsDashboard from "./components/MyProjectsDashboard";
+import AdminPortal from "./components/AdminPortal";
+import ChangePasswordModal from "./components/ChangePasswordModal";
 import { getSupabaseClient } from "./supabaseClient";
 import {
   UploadCloud,
@@ -37,7 +39,8 @@ import {
   Sliders,
   Zap,
   CheckCircle2,
-  HelpCircle
+  HelpCircle,
+  LogIn
 } from "lucide-react";
 
 interface HeaderItem {
@@ -102,6 +105,7 @@ export default function App() {
   // --- SUPABASE CLOUD STATES & ACTIONS ---
   const [session, setSession] = useState<any>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState<boolean>(false);
   const [activeCloudProjectId, setActiveCloudProjectId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -121,11 +125,7 @@ export default function App() {
             }
           }).catch(err => console.warn("Silent profile sync err:", err));
         } else {
-          // If no active session, pop-up login unless user skipped it previously
-          const skipped = localStorage.getItem("pytestify_skipped_login") === "true";
-          if (!skipped) {
-            setIsAuthModalOpen(true);
-          }
+          setIsAuthModalOpen(true);
         }
       }
 
@@ -295,7 +295,7 @@ export default function App() {
   const [activeRailTab, setActiveRailTab] = useState<"explorer" | "settings">("explorer");
 
   // UI Navigation / Interaction states
-  const [activeTab, setActiveTab] = useState<"consolidated" | "modular" | "run" | "mcp">("consolidated");
+  const [activeTab, setActiveTab] = useState<"consolidated" | "modular" | "run" | "mcp" | "audit">("consolidated");
 
   // MCP Related States
   const [mcpTools, setMcpTools] = useState<any[]>([]);
@@ -328,7 +328,11 @@ export default function App() {
 
   const fetchMcpTools = async () => {
     try {
-      const res = await fetch("/api/mcp/tools");
+      const headers: any = {};
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+      const res = await fetch("/api/mcp/tools", { headers });
       if (res.ok) {
         const data = await res.json();
         setMcpTools(data.tools || []);
@@ -340,7 +344,11 @@ export default function App() {
 
   const fetchMcpLogs = async () => {
     try {
-      const res = await fetch("/api/mcp/logs");
+      const headers: any = {};
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+      const res = await fetch("/api/mcp/logs", { headers });
       if (res.ok) {
         const data = await res.json();
         setMcpLogs(data.logs || []);
@@ -408,9 +416,14 @@ export default function App() {
         id: Date.now()
       };
 
+      const headers: any = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+
       const res = await fetch("/api/mcp", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(jsonRpcPayload)
       });
 
@@ -449,9 +462,14 @@ export default function App() {
     try {
       const errorDetails = execResult?.failures?.map(f => `${f.test_name}: ${f.error_message}`).join("\n") || "";
 
+      const headers: any = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+
       const res = await fetch("/api/mcp/agent-chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           prompt: activePrompt,
           customApiKey,
@@ -984,6 +1002,56 @@ export default function App() {
     ? "bg-[#151619] border-neutral-700 text-neutral-200" 
     : "bg-white border-neutral-300 text-neutral-800";
 
+  if (!session) {
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center font-sans tracking-tight leading-normal ${isDarkMode ? "bg-[#0b0c0d] text-neutral-100" : "bg-neutral-50 text-neutral-800"}`}>
+        <div className="absolute inset-x-0 top-0 h-1 bg-[#101112]"></div>
+
+        <div className="w-full max-w-sm p-8 rounded-2xl border border-neutral-800/60 bg-[#111215]/80 backdrop-blur-md shadow-2xl relative overflow-hidden flex flex-col items-center text-center">
+          <div className="absolute -top-16 -right-16 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl"></div>
+          
+          <div className="p-4 bg-indigo-600/10 border border-indigo-500/20 rounded-2xl mb-5 flex items-center justify-center text-indigo-400">
+            <Zap className="h-10 w-10 animate-pulse text-indigo-500 fill-indigo-500/10" />
+          </div>
+
+          <span className="px-2.5 py-1 text-[9px] font-mono tracking-widest text-[#beebd8] bg-[#0b241d]/80 border border-indigo-500/20 rounded-md font-bold uppercase mb-4">
+            Identity gatekeeper
+          </span>
+
+          <h2 className="text-xl font-extrabold font-display text-white tracking-tight mb-2">
+            Pytestify Enterprise Workspace
+          </h2>
+          
+          <p className="text-xs text-neutral-400 font-light max-w-xs leading-relaxed mb-6">
+            Authorized single sign-on is mandatory for this tenant instance. All operations, executions, and file translations are audited and tracked under corporate compliance rules.
+          </p>
+
+          <div className="flex flex-col gap-3 w-full max-w-xs mb-3">
+            <button
+              id="workspace-entrance-signin-btn"
+              onClick={() => setIsAuthModalOpen(true)}
+              className="w-full py-2.5 bg-indigo-600 hover:bg-slate-700 text-white font-mono text-xs font-bold rounded-lg transition duration-200 cursor-pointer shadow-md flex items-center justify-center gap-1.5"
+            >
+              <LogIn className="h-4 w-4" />
+              Sign In Workspace
+            </button>
+          </div>
+
+          <div className="text-[9px] font-mono text-neutral-500 mt-2">
+            PORT : 3000 | COMPLIANCE AGENT ACTIVE
+          </div>
+        </div>
+
+        <AuthModal
+          isOpen={isAuthModalOpen}
+          onClose={() => setIsAuthModalOpen(false)}
+          isDarkMode={isDarkMode}
+          onAuthSuccess={(newSession) => setSession(newSession)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className={`min-h-screen flex flex-col font-sans transition-colors duration-200 antialiased selection:bg-indigo-500/10 selection:text-indigo-500 ${bgMain}`}>
       
@@ -1071,9 +1139,31 @@ export default function App() {
                   </div>
 
                   <button
+                    onClick={() => setIsChangePasswordModalOpen(true)}
+                    className={`px-2 py-1.5 rounded-lg border ${borderCol} ${bgAccent} hover:bg-indigo-600/10 text-neutral-300 hover:text-indigo-400 font-mono text-[10px] tracking-wide font-extrabold transition cursor-pointer flex items-center gap-1`}
+                    title="Change Password"
+                  >
+                    PASS
+                  </button>
+
+                  <button
                     onClick={async () => {
                       const s = await getSupabaseClient();
                       if (s) {
+                        try {
+                          await fetch("/api/users/sync", {
+                            method: "POST",
+                            headers: {
+                              "Content-Type": "application/json",
+                              "Authorization": `Bearer ${session.access_token}`
+                            },
+                            body: JSON.stringify({
+                              isLogoutEvent: true
+                            })
+                          });
+                        } catch (logErr) {
+                          console.warn("Silent logout sync failure:", logErr);
+                        }
                         await s.auth.signOut();
                         setActiveCloudProjectId(null);
                         localStorage.removeItem("pytestify_skipped_login");
@@ -1593,6 +1683,18 @@ export default function App() {
                 >
                   <Cpu className="h-4 w-4 text-emerald-500 animate-pulse" />
                   MCP Hub
+                </button>
+                <button
+                  id="tab-btn-directory-audit"
+                  onClick={() => setActiveTab("audit")}
+                  className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
+                    activeTab === "audit"
+                      ? "border-amber-500 text-amber-500 font-bold"
+                      : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
+                  }`}
+                >
+                  <ShieldCheck className="h-4 w-4 text-amber-500 animate-pulse" />
+                  Directory & Logs
                 </button>
 
               </div>
@@ -2509,6 +2611,27 @@ export default function App() {
               </div>
             )}
 
+            {/* SUBTAB CONTENT: ENTERPRISE AUDIT PORTAL */}
+            {activeTab === "audit" && (
+              <div className="space-y-6 animate-fade-in">
+                <div className={`border ${borderCol} rounded-2xl p-5 md:p-6 bg-[#111215]/40 backdrop-blur-md shadow-md`}>
+                  <div className="flex justify-between items-center border-b border-neutral-800/40 pb-3.5 mb-5">
+                    <div className="text-left">
+                      <h2 className={`text-base font-bold font-display flex items-center gap-2 ${textTitle}`}>
+                        <ShieldCheck className="h-5 w-5 text-amber-500 animate-pulse" />
+                        Enterprise Governance & Auditing Workspace
+                      </h2>
+                      <p className="text-xs text-neutral-500 font-light mt-0.5">
+                        Multi-tenant directory settings, encrypted security logs, and live LLM tool activity trackers.
+                      </p>
+                    </div>
+                  </div>
+                  
+                  <AdminPortal session={session} isDarkMode={isDarkMode} />
+                </div>
+              </div>
+            )}
+
 
             {/* AI Prompts and Pipeline Logs Metadata (Trace logs at bottom) */}
             {aiPromptMeta && activeTab === "consolidated" && (
@@ -2556,6 +2679,14 @@ export default function App() {
         onClose={() => setIsAuthModalOpen(false)}
         isDarkMode={isDarkMode}
         onAuthSuccess={(newSession) => setSession(newSession)}
+      />
+
+      {/* Change Password Modal overlay */}
+      <ChangePasswordModal
+        isOpen={isChangePasswordModalOpen}
+        onClose={() => setIsChangePasswordModalOpen(false)}
+        session={session}
+        isDarkMode={isDarkMode}
       />
     </div>
   );
