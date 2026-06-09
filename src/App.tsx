@@ -126,6 +126,16 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [sampleCollections, setSampleCollections] = useState<any[]>([]);
 
+  // Custom Gemini API Key override to handle running out of tokens / quota errors gracefully
+  const [customApiKey, setCustomApiKey] = useState<string>(() => {
+    return localStorage.getItem("pytestify_custom_gemini_key") || "";
+  });
+
+  // Sync customApiKey with localStorage
+  useEffect(() => {
+    localStorage.setItem("pytestify_custom_gemini_key", customApiKey);
+  }, [customApiKey]);
+
   // Selected single request index for Postman-like deep inspect view
   const [selectedRequestIndex, setSelectedRequestIndex] = useState<number>(0);
   const [reqActiveTab, setReqActiveTab] = useState<"headers" | "body" | "chai">("chai");
@@ -136,10 +146,207 @@ export default function App() {
   const [execResult, setExecResult] = useState<ExecutionResult | null>(null);
 
   // Left Rail Navigation active view
-  const [activeRailTab, setActiveRailTab] = useState<"explorer" | "settings" | "docs">("explorer");
+  const [activeRailTab, setActiveRailTab] = useState<"explorer" | "settings">("explorer");
 
   // UI Navigation / Interaction states
-  const [activeTab, setActiveTab] = useState<"consolidated" | "modular" | "run" | "docs">("consolidated");
+  const [activeTab, setActiveTab] = useState<"consolidated" | "modular" | "run" | "mcp">("consolidated");
+
+  // MCP Related States
+  const [mcpTools, setMcpTools] = useState<any[]>([]);
+  const [mcpLogs, setMcpLogs] = useState<any[]>([]);
+  const [mcpSelectedTool, setMcpSelectedTool] = useState<string>("generate_pytest");
+  const [mcpToolArgs, setMcpToolArgs] = useState<string>(() => {
+    return JSON.stringify({
+      collection: {
+        info: { name: "Sample API" },
+        items: [
+          { name: "Auth Check", request: { method: "POST", url: "https://api.example.com/v1/login" } }
+        ]
+      }
+    }, null, 2);
+  });
+  const [mcpRawResponse, setMcpRawResponse] = useState<string>("");
+  const [mcpIsCallingTool, setMcpIsCallingTool] = useState<boolean>(false);
+  
+  // Agent Chat States
+  const [mcpAgentInput, setMcpAgentInput] = useState<string>("");
+  const [agentChats, setAgentChats] = useState<any[]>([
+    {
+      sender: "agent",
+      thought: "Initialized QA helper agent. Ready to handle collection migrations and failures diagnoses.",
+      finalResponse: "Hello! I am your AI Agent integrated with local MCP tools. Ask me to fetch collections, translate them to pytest, execute tests, or analyze mock failures!",
+      timestamp: new Date().toISOString()
+    }
+  ]);
+  const [mcpIsAgentThinking, setMcpIsAgentThinking] = useState<boolean>(false);
+
+  const fetchMcpTools = async () => {
+    try {
+      const res = await fetch("/api/mcp/tools");
+      if (res.ok) {
+        const data = await res.json();
+        setMcpTools(data.tools || []);
+      }
+    } catch (e) {
+      console.error("Failed to load schema tools", e);
+    }
+  };
+
+  const fetchMcpLogs = async () => {
+    try {
+      const res = await fetch("/api/mcp/logs");
+      if (res.ok) {
+        const data = await res.json();
+        setMcpLogs(data.logs || []);
+      }
+    } catch (e) {
+      console.error("Failed to load mcp query logs", e);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "mcp") {
+      fetchMcpTools();
+      fetchMcpLogs();
+      const interval = setInterval(() => {
+        fetchMcpTools();
+        fetchMcpLogs();
+      }, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (mcpSelectedTool === "fetch_postman_collection") {
+      setMcpToolArgs(JSON.stringify({ collection_id: "user-api" }, null, 2));
+    } else if (mcpSelectedTool === "generate_pytest") {
+      setMcpToolArgs(JSON.stringify({
+        collection: {
+          info: { name: "User Service" },
+          items: [
+            {
+              name: "Health status Check",
+              request: { method: "GET", url: "https://api.example.com/v1/health" }
+            }
+          ]
+        }
+      }, null, 2));
+    } else if (mcpSelectedTool === "run_pytest") {
+      setMcpToolArgs(JSON.stringify({ file_path: "test_all_apis.py" }, null, 2));
+    } else if (mcpSelectedTool === "analyze_failure") {
+      const errorLogText = execResult?.failures?.[0]?.error_message || "AssertionError: Expected 201 Response code but got 401 Unauthorized status.";
+      setMcpToolArgs(JSON.stringify({ error_log: errorLogText }, null, 2));
+    }
+  }, [mcpSelectedTool, execResult]);
+
+  const handleInvokeMcpToolRaw = async () => {
+    setMcpIsCallingTool(true);
+    setMcpRawResponse("");
+    try {
+      let parsedArgs = {};
+      try {
+        parsedArgs = JSON.parse(mcpToolArgs);
+      } catch (jsonErrString) {
+        setMcpRawResponse(`// JSON-RPC Error: Invalid JSON input parameters.\n${jsonErrString}`);
+        setMcpIsCallingTool(false);
+        return;
+      }
+
+      const jsonRpcPayload = {
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: mcpSelectedTool,
+          arguments: parsedArgs
+        },
+        id: Date.now()
+      };
+
+      const res = await fetch("/api/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(jsonRpcPayload)
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        setMcpRawResponse(`// Http Error Block: ${res.status} ${res.statusText}\n${txt}`);
+      } else {
+        const data = await res.json();
+        setMcpRawResponse(JSON.stringify(data, null, 2));
+        fetchMcpTools();
+        fetchMcpLogs();
+      }
+    } catch (e: any) {
+      setMcpRawResponse(`// Client Exception raised on Fetch Request:\n${e.message || String(e)}`);
+    } finally {
+      setMcpIsCallingTool(false);
+    }
+  };
+
+  const handleAgentChatSubmit = async (customPrompt?: string) => {
+    const activePrompt = customPrompt || mcpAgentInput;
+    if (!activePrompt.trim()) return;
+
+    const newUserMsg = {
+      sender: "user",
+      text: activePrompt,
+      timestamp: new Date().toISOString()
+    };
+
+    setAgentChats(prev => [...prev, newUserMsg]);
+    if (!customPrompt) {
+      setMcpAgentInput("");
+    }
+    setMcpIsAgentThinking(true);
+
+    try {
+      const errorDetails = execResult?.failures?.map(f => `${f.test_name}: ${f.error_message}`).join("\n") || "";
+
+      const res = await fetch("/api/mcp/agent-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: activePrompt,
+          customApiKey,
+          contextState: {
+            errorDetails
+          }
+        })
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        setAgentChats(prev => [...prev, {
+          sender: "agent",
+          finalResponse: `Agent failed to execute successfully. Status ${res.status}: ${errorText}`,
+          timestamp: new Date().toISOString()
+        }]);
+      } else {
+        const data = await res.json();
+        setAgentChats(prev => [...prev, {
+          sender: "agent",
+          thought: data.thought,
+          toolCalled: data.toolCalled,
+          toolArguments: data.toolArguments,
+          toolResult: data.toolResult,
+          finalResponse: data.finalResponse,
+          timestamp: new Date().toISOString()
+        }]);
+        fetchMcpTools();
+        fetchMcpLogs();
+      }
+    } catch (err: any) {
+      setAgentChats(prev => [...prev, {
+        sender: "agent",
+        finalResponse: `Network error connecting to Agent Server: ${err.message}`,
+        timestamp: new Date().toISOString()
+      }]);
+    } finally {
+      setMcpIsAgentThinking(false);
+    }
+  };
+
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [selectedFileIndex, setSelectedFileIndex] = useState<number>(0);
@@ -422,7 +629,8 @@ export default function App() {
             baseUrl: baseUrlEnv,
             injectBaseUrlFixture,
             addComments
-          }
+          },
+          customApiKey
         })
       });
       const data = await res.json();
@@ -459,7 +667,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           pytest_code: pytestCode,
-          simulationMode
+          simulationMode,
+          customApiKey
         })
       });
       const data = await res.json();
@@ -660,13 +869,7 @@ export default function App() {
             <Sliders className="h-5 w-5" />
           </button>
 
-          <button
-            onClick={() => { setActiveRailTab("docs"); setActiveTab("docs"); }}
-            className={`p-2.5 rounded-xl transition ${activeRailTab === "docs" && activeTab === "docs" ? "bg-[#ef5b25] text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
-            title="Integrated Manuals"
-          >
-            <BookOpen className="h-5 w-5" />
-          </button>
+
 
           <div className="flex-1 hidden xl:block"></div>
 
@@ -937,6 +1140,34 @@ export default function App() {
                         </div>
                       </label>
                     </div>
+
+                    <div className="flex flex-col gap-1.5 pt-2.5 border-t border-neutral-800/10">
+                      <span className="text-[9px] font-mono text-amber-500 uppercase font-bold flex items-center gap-1">
+                        <Key className="h-3 w-3" />
+                        Fallback Gemini API Key (Optional)
+                      </span>
+                      <p className={`${isDarkMode ? "text-neutral-500" : "text-neutral-400"} text-[9.5px]/snug font-light`}>
+                        If the app's default token limits run out or get busy, supply your own key to secure immediate translation tasks.
+                      </p>
+                      <input
+                        type="password"
+                        placeholder="AIzaSy..."
+                        value={customApiKey}
+                        onChange={(e) => setCustomApiKey(e.target.value)}
+                        className={`py-1.5 px-2 border rounded text-xs font-mono placeholder:text-neutral-600 ${selectStyle}`}
+                      />
+                      {customApiKey && (
+                        <div className="flex justify-between items-center text-[9px] font-mono text-emerald-500 bg-emerald-500/5 px-2 py-0.5 rounded border border-emerald-500/10 mt-0.5">
+                          <span>✓ Active local key override</span>
+                          <button
+                            onClick={() => setCustomApiKey("")}
+                            className="hover:underline text-neutral-400 text-[8px]"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1071,16 +1302,17 @@ export default function App() {
                   Live Runner
                 </button>
                 <button
-                  onClick={() => setActiveTab("docs")}
+                  onClick={() => setActiveTab("mcp")}
                   className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                    activeTab === "docs"
+                    activeTab === "mcp"
                       ? "border-orange-500 text-orange-500 font-bold"
                       : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
                   }`}
                 >
-                  <BookOpen className="h-4 w-4" />
-                  Documents
+                  <Cpu className="h-4 w-4 text-emerald-500 animate-pulse" />
+                  MCP Hub
                 </button>
+
               </div>
             </div>
 
@@ -1654,44 +1886,347 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB AREA 4: SPECIFICATION DOCUMENTATION NOTES */}
-            {activeTab === "docs" && (
-              <div className="flex flex-col gap-4">
-                <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-5`}>
-                  <div>
-                    <h3 className="text-xs font-bold font-mono tracking-wider uppercase text-[#ef5b25] flex items-center gap-2">
-                      <BookOpen className="h-4.5 w-4.5" />
-                      AUTOMATED RUNNER CHEAT MANUAL
-                    </h3>
-                    <p className="text-[11px] text-neutral-400 mt-1 leading-normal font-light">
-                      This space persists workspace blueprints generated inside your workspace folder directory:
-                    </p>
-                  </div>
-
-                  <div className={`grid grid-cols-1 md:grid-cols-2 gap-4`}>
-                    <div className={`p-3 ${isDarkMode ? "bg-neutral-900/30 border-neutral-800" : "bg-neutral-100/50 border-neutral-200"} rounded-xl border flex flex-col gap-2`}>
-                      <div className={`flex justify-between items-center border-b ${isDarkMode ? "border-neutral-800" : "border-neutral-200"} pb-2 mb-1`}>
-                        <span className="text-[11px] font-bold">README.md</span>
-                        <span className="text-[8px] text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded uppercase font-bold">Verified</span>
-                      </div>
-                      <pre className={`font-mono text-[9.5px]/relaxed ${isDarkMode ? "text-neutral-400" : "text-neutral-600"} max-h-36 overflow-y-auto select-all whitespace-pre-wrap`}>
-                        {`# Translated Pytest test suite\n\nGenerated automatically via Gemini translation engines.\n\n## Contents\n- test_all_apis.py: Consolidated test sequences.\n- conftest.py: Shared host urls values fixture.\n\n## Running locally\n\`\`\`bash\npip install pytest requests httpx\npytest -v\n\`\`\``}
-                      </pre>
+            {/* TAB AREA 4: MODEL CONTEXT PROTOCOL (MCP) INTERACTIVE SANDBOX HUB */}
+            {activeTab === "mcp" && (
+              <div className="flex flex-col gap-6 animate-fadeIn pb-6">
+                
+                {/* Protocol Health Card */}
+                <div className={`p-4 md:p-5 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-sm pb-5`}>
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-500 animate-pulse">
+                      <Server className="h-5 w-5" />
                     </div>
-
-                    <div className={`p-3 ${isDarkMode ? "bg-neutral-900/30 border-neutral-800" : "bg-neutral-100/50 border-neutral-200"} rounded-xl border flex flex-col gap-2`}>
-                      <div className={`flex justify-between items-center border-b ${isDarkMode ? "border-neutral-800" : "border-neutral-200"} pb-2 mb-1`}>
-                        <span className="text-[11px] font-bold">AI_USAGE_NOTE.md</span>
-                        <span className="text-[8px] text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded uppercase font-bold">Verified</span>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className={`text-xs font-bold font-mono uppercase tracking-wider ${isDarkMode ? "text-neutral-100" : "text-neutral-900"}`}>
+                          Model Context Protocol Server
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 tracking-wider font-mono">
+                          ● LIVE
+                        </span>
                       </div>
-                      <pre className={`font-mono text-[9.5px]/relaxed ${isDarkMode ? "text-neutral-400" : "text-neutral-600"} max-h-36 overflow-y-auto select-all whitespace-pre-wrap`}>
-                        {`## 🤖 What AI Helped With\n1. AST Assert mapping translation\n- Decoded Chai variables status assertions and translated them to standard Pytest statements.\n\n2. Sandbox failures mapping\n- Synthesized failures reports inside dynamic sandbox runs.`}
-                      </pre>
+                      <p className="text-[10px] text-neutral-500 font-mono mt-0.5 select-all">
+                        Active Ingress: http://localhost:3000/api/mcp (JSON-RPC 2.0 Web Protocol)
+                      </p>
                     </div>
                   </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={() => { fetchMcpTools(); fetchMcpLogs(); }}
+                      className={`py-1.5 px-3 rounded-lg border ${borderCol} text-[10px] font-mono hover:bg-neutral-500/5 transition flex items-center gap-1.5 font-bold uppercase cursor-pointer`}
+                    >
+                      <RefreshCw className="h-3.5 w-3.5 text-[#ef5b25]" />
+                      Sync Registry
+                    </button>
+                    <a
+                      href="/api/mcp/tools"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={`py-1.5 px-3 rounded-lg border ${borderCol} text-[10px] font-mono hover:bg-neutral-500/5 transition flex items-center gap-1.5 font-bold uppercase`}
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      View JSON Schema
+                    </a>
+                  </div>
+                </div>
+
+                {/* Main Two-Column Panel Splitter */}
+                <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+                  
+                  {/* Left Column: Registered Tools & Raw Sandbox (xl:col-span-7) */}
+                  <div className="xl:col-span-7 flex flex-col gap-6">
+                    
+                    <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
+                      <div>
+                        <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-orange-500 flex items-center gap-2">
+                          <Cpu className="h-4.5 w-4.5" />
+                          MCP Server Tools Dashboard
+                        </h4>
+                        <p className="text-[11px] text-neutral-400 mt-1 leading-normal font-light">
+                          These tools are automatically registered with the protocol server and are fully discoverable by domestic and external model context protocols.
+                        </p>
+                      </div>
+
+                      {/* Tool Deck Cards */}
+                      <div className="flex flex-col gap-3">
+                        {mcpTools.length === 0 ? (
+                          <div className="text-center py-6 text-xs text-neutral-500 font-mono">No tools registered in schema. Reloading server...</div>
+                        ) : (
+                          mcpTools.map((tool) => (
+                            <div
+                              key={tool.name}
+                              className={`p-3.5 rounded-xl border ${mcpSelectedTool === tool.name ? "border-[#ef5b25]/50 bg-[#ef5b25]/5" : isDarkMode ? "border-neutral-800 bg-neutral-900/10 hover:bg-neutral-900/30" : "border-neutral-200 bg-neutral-50 hover:bg-neutral-100/50"} transition flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer`}
+                              onClick={() => setMcpSelectedTool(tool.name)}
+                            >
+                              <div className="flex-1 min-w-0 font-sans">
+                                <div className="flex items-center gap-2 font-mono">
+                                  <span className={`text-[12px] font-bold ${mcpSelectedTool === tool.name ? "text-[#ef5b25]" : isDarkMode ? "text-white" : "text-neutral-900"}`}>
+                                    {tool.name}
+                                  </span>
+                                  <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-widest ${tool.status === "active" ? "text-emerald-500 bg-emerald-500/10 border border-emerald-500/20" : "text-amber-500 bg-amber-500/10"}`}>
+                                    {tool.status}
+                                  </span>
+                                </div>
+                                <p className={`text-[10px]/relaxed ${isDarkMode ? "text-neutral-400" : "text-neutral-600"} font-light mt-1`}>
+                                  {tool.description}
+                                </p>
+                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[9px] font-mono text-neutral-500">
+                                  <span>Required Keys: <strong className="font-bold">{tool.inputSchema?.required?.join(", ") || "None"}</strong></span>
+                                  <span>•</span>
+                                  <span>Last Run: <strong className="font-bold text-neutral-500">{tool.lastInvocationTime ? new Date(tool.lastInvocationTime).toLocaleTimeString() : "Never"}</strong></span>
+                                </div>
+                              </div>
+                              <div className="shrink-0 flex items-center justify-end">
+                                <ChevronRight className={`h-4.5 w-4.5 transition ${mcpSelectedTool === tool.name ? "text-[#ef5b25] translate-x-1" : "text-neutral-600"}`} />
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Collapsible API Tester Workbench */}
+                    {mcpSelectedTool && (
+                      <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm animate-fadeIn`}>
+                        <div className="flex justify-between items-center border-b border-neutral-800/20 pb-2.5">
+                          <div>
+                            <span className="text-[10px] font-mono text-[#ef5b25] uppercase font-bold tracking-wider">RAW TOOL WORKBENCH</span>
+                            <h4 className={`text-xs font-bold font-mono text-neutral-300 mt-0.5`}>
+                              RPC Method Call: <span className="text-[#ef5b25] select-all">{mcpSelectedTool}</span>
+                            </h4>
+                          </div>
+                          <span className="text-[9px] font-mono text-neutral-500 uppercase tracking-widest">JSON-RPC 2.0</span>
+                        </div>
+
+                        {/* Split pane for Raw tool input/output */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          
+                          {/* Input argument editor */}
+                          <div className="flex flex-col gap-1.5 text-xs">
+                            <span className="text-[10px] font-mono text-neutral-400 flex items-center gap-1.5 font-bold uppercase">
+                              <Settings className="h-3.5 w-3.5" />
+                              Call Arguments (JSON)
+                            </span>
+                            <textarea
+                              value={mcpToolArgs}
+                              onChange={(e) => setMcpToolArgs(e.target.value)}
+                              rows={10}
+                              className={`w-full py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-700 bg-black/40 ${isDarkMode ? "bg-[#0d0d10] border-neutral-800 text-neutral-200 focus:border-orange-500" : "bg-neutral-50 border-neutral-200 text-neutral-900 focus:border-orange-500"}`}
+                              placeholder="{}"
+                            />
+                            <button
+                              onClick={handleInvokeMcpToolRaw}
+                              disabled={mcpIsCallingTool}
+                              className="mt-1 bg-orange-600/10 hover:bg-orange-600/25 text-[#ef5b25] border border-orange-500/20 hover:border-orange-500/50 transition font-mono font-bold py-2 rounded-xl flex items-center justify-center gap-2 text-xs cursor-pointer"
+                            >
+                              {mcpIsCallingTool ? (
+                                <>
+                                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                  Triggering internal pipeline...
+                                </>
+                              ) : (
+                                <>
+                                  <Send className="h-3.5 w-3.5" />
+                                  Call 'tools/call' RPC
+                                </>
+                              )}
+                            </button>
+                          </div>
+
+                          {/* Raw RPC Console Output */}
+                          <div className="flex flex-col gap-1.5 text-xs">
+                            <span className="text-[10px] font-mono text-neutral-400 flex items-center gap-1.5 font-bold uppercase">
+                              <Terminal className="h-3.5 w-3.5" />
+                              Server JSON-RPC Response JSON
+                            </span>
+                            <div className={`w-full h-[264px] border rounded-xl p-3 font-mono text-[10.5px]/relaxed overflow-auto select-all max-h-72 align-top ${isDarkMode ? "bg-[#09090b] text-[#55ea46] border-neutral-800" : "bg-neutral-50 border-neutral-200 text-[#ef5b25]"}`}>
+                              {mcpRawResponse ? (
+                                <pre className="whitespace-pre">{mcpRawResponse}</pre>
+                              ) : (
+                                <span className="text-neutral-500 text-[10px] italic font-light">// Invoke the RPC method call above to trace structured JSON records here...</span>
+                              )}
+                            </div>
+                          </div>
+
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
+
+                  {/* Right Column: AI Agent Sandbox & Protocol Logs (xl:col-span-5) */}
+                  <div className="xl:col-span-5 flex flex-col gap-6">
+                    
+                    {/* conversational agent client */}
+                    <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
+                      <div>
+                        <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-emerald-500 flex items-center gap-2">
+                          <Sparkles className="h-4.5 w-4.5 animate-pulse text-emerald-500" />
+                          MCP AI Agent Sandbox
+                        </h4>
+                        <p className="text-[11px] text-neutral-400 mt-1 leading-normal font-light font-sans">
+                          Our AI Agent operates autonomously on top of our live environment. Describe what you want, and the agent will dynamically select and invoke the best tool.
+                        </p>
+                      </div>
+
+                      {/* Suggestions list */}
+                      <div className="flex flex-col gap-1.5 border-b border-neutral-800/10 pb-3">
+                        <span className="text-[9px] font-mono text-neutral-500 uppercase font-bold">Suggested Agentic Prompts:</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          <button
+                            onClick={() => handleAgentChatSubmit("Fetch user-api from postman store")}
+                            className={`py-1.5 px-2 rounded-lg border text-[9.5px] font-mono font-medium transition cursor-pointer ${isDarkMode ? "bg-neutral-900/50 border-neutral-800 text-neutral-300 hover:bg-neutral-800" : "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-100"}`}
+                          >
+                            "Fetch collection user-api"
+                          </button>
+                          <button
+                            onClick={() => handleAgentChatSubmit("Generate the Python pytest script for me please")}
+                            className={`py-1.5 px-2 rounded-lg border text-[9.5px] font-mono font-medium transition cursor-pointer ${isDarkMode ? "bg-neutral-900/50 border-neutral-800 text-neutral-300 hover:bg-neutral-800" : "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-100"}`}
+                          >
+                            "Translate user-api to pytest"
+                          </button>
+                          <button
+                            onClick={() => handleAgentChatSubmit("Explain why my tests failed and recommend fixes")}
+                            className={`py-1.5 px-2 rounded-lg border text-[9.5px] font-mono font-medium transition cursor-pointer ${isDarkMode ? "bg-neutral-900/50 border-neutral-800 text-neutral-300 hover:bg-neutral-800" : "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-100"}`}
+                          >
+                            "Analyze run failure log"
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Conversation log stream */}
+                      <div className={`h-80 border ${borderCol} rounded-xl p-3 overflow-y-auto flex flex-col gap-3 max-h-[380px] bg-black/10`}>
+                        {agentChats.map((chat, idx) => (
+                          <div
+                            key={idx}
+                            className={`flex flex-col gap-1 max-w-[90%] ${chat.sender === "user" ? "self-end items-end" : "self-start items-start"}`}
+                          >
+                            <span className="text-[9px] font-mono text-neutral-500">
+                              {chat.sender === "user" ? "User" : "MCP AI QA Agent"} • {new Date(chat.timestamp || Date.now()).toLocaleTimeString()}
+                            </span>
+                            <div className={`px-3 py-2 rounded-xl text-[11px] leading-relaxed ${chat.sender === "user" ? "bg-[#ef5b25]/15 text-[#ef5b25] border border-orange-500/20 font-medium font-mono" : isDarkMode ? "bg-neutral-900/60 text-neutral-100 border border-neutral-800" : "bg-white text-neutral-800 border border-neutral-200"}`}>
+                              
+                              {/* Direct user text or response */}
+                              {chat.text && <p className="whitespace-pre-wrap">{chat.text}</p>}
+                              {chat.finalResponse && <p className="whitespace-pre-wrap font-sans">{chat.finalResponse}</p>}
+
+                              {/* Telemetry traces nested inside Agent Responses to expose exact tool-calling choices */}
+                              {chat.toolCalled && (
+                                <div className="mt-2.5 p-2 bg-neutral-950/80 rounded-lg border border-neutral-800/80 text-[10px] font-mono text-neutral-300 flex flex-col gap-1.5 leading-normal">
+                                  <div className="flex items-center gap-1.5 text-orange-500 font-bold text-[9px] uppercase tracking-wider">
+                                    <Cpu className="h-3 w-3 text-orange-500 animate-pulse" />
+                                    Agent Tool Execution Log
+                                  </div>
+                                  <div>
+                                    <span className="text-neutral-500 text-[9px]">Decision Thought:</span>
+                                    <p className="text-neutral-300 text-[10px] italic font-light mt-0.5">"{chat.thought}"</p>
+                                  </div>
+                                  <div>
+                                    <span className="text-neutral-500 text-[9px]">Tool Selected:</span> <strong className="text-orange-500">{chat.toolCalled}</strong>
+                                  </div>
+                                  <div>
+                                    <span className="text-neutral-500 text-[9px]">Resolved Args:</span>
+                                    <pre className="text-[9px] text-[#55ea46] mt-0.5 bg-black/40 p-1 rounded overflow-x-auto">{JSON.stringify(chat.toolArguments, null, 2)}</pre>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+
+                        {mcpIsAgentThinking && (
+                          <div className="self-start flex flex-col gap-1.5">
+                            <span className="text-[9px] font-mono text-neutral-500 flex items-center gap-1">
+                              <RefreshCw className="h-2.5 w-2.5 animate-spin text-emerald-500" />
+                              Agent thinking and selecting tools...
+                            </span>
+                            <div className={`px-4 py-2 bg-neutral-900/30 border border-neutral-800 rounded-xl max-w-[80%] flex items-center gap-2`}>
+                              <div className="flex gap-1">
+                                <span className="h-1.5 w-1.5 bg-emerald-500 rounded-full animate-bounce"></span>
+                                <span className="h-1.5 w-1.5 bg-emerald-500 rounded-full animate-bounce delay-150"></span>
+                                <span className="h-1.5 w-1.5 bg-emerald-500 rounded-full animate-bounce delay-300"></span>
+                              </div>
+                              <span className="text-[10px] font-mono text-neutral-400">Consulting local MCP schema registry...</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Chat chat bar */}
+                      <form
+                        onSubmit={(e) => { e.preventDefault(); handleAgentChatSubmit(); }}
+                        className="flex gap-2"
+                      >
+                        <input
+                          type="text"
+                          value={mcpAgentInput}
+                          onChange={(e) => setMcpAgentInput(e.target.value)}
+                          placeholder="Ask Agent to call 'analyze_failure'..."
+                          className={`flex-grow py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-[#ef5b25] ${selectStyle}`}
+                        />
+                        <button
+                          type="submit"
+                          disabled={mcpIsAgentThinking || !mcpAgentInput.trim()}
+                          className="bg-[#ef5b25] hover:bg-orange-600 font-bold font-mono px-4 py-2 text-white rounded-xl text-xs flex items-center gap-1.5 transition uppercase cursor-pointer"
+                        >
+                          <Send className="h-3 w-3" />
+                          Send
+                        </button>
+                      </form>
+
+                    </div>
+
+                    {/* Protocol Server Log Stream */}
+                    <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
+                      <div className="flex justify-between items-center border-b border-neutral-800/20 pb-2.5">
+                        <div>
+                          <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-[#ef5b25] flex items-center gap-1.5">
+                            <Activity className="h-4 w-4" />
+                            Live Invocations logs
+                          </h4>
+                          <p className="text-[10px] text-neutral-500 font-light mt-0.5 leading-normal font-sans">
+                            Chronological history of JSON-RPC schema calls intercepted by the server.
+                          </p>
+                        </div>
+                        <span className="text-[9px] text-[#ef5b25] bg-[#ef5b25]/10 px-2 py-0.5 rounded font-mono font-black uppercase">Intercepting</span>
+                      </div>
+
+                      <div className="flex flex-col gap-2 max-h-56 overflow-y-auto">
+                        {mcpLogs.length === 0 ? (
+                          <div className="text-center py-6 text-neutral-500 font-mono text-[9px] italic">No active server invocations logged yet. Execute a sandbox tool to monitor live triggers!</div>
+                        ) : (
+                          mcpLogs.map((log) => (
+                            <div
+                              key={log.id}
+                              className={`p-2.5 rounded-lg border font-mono text-[9.5px]/relaxed leading-normal ${log.status === "error" ? "bg-rose-500/5 border-rose-500/10 text-rose-400" : isDarkMode ? "bg-neutral-900/40 border-neutral-800 text-neutral-300" : "bg-white border-neutral-200 text-neutral-700"}`}
+                            >
+                              <div className="flex justify-between items-center border-b border-neutral-800/10 pb-1 mb-1.5 text-[8.5px]">
+                                <span className={`font-bold uppercase ${log.status === "error" ? "text-rose-500" : "text-emerald-500"}`}>
+                                  {log.status === "error" ? "✗ RPC Error" : "✓ RPC Success"}
+                                </span>
+                                <span className="text-neutral-500">
+                                  {new Date(log.timestamp).toLocaleTimeString()}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-neutral-500">Method called:</span> <strong className={isDarkMode ? "text-neutral-100" : "text-neutral-900"}>{log.toolName}</strong>
+                              </div>
+                              <details className="mt-1">
+                                <summary className="cursor-pointer text-[8.5px] text-[#ef5b25] font-semibold hover:underline">Show log transaction envelope</summary>
+                                <pre className="text-[8.5px] text-neutral-400 mt-1.5 bg-black/35 p-1 rounded max-h-16 overflow-y-auto select-all whitespace-pre-wrap">{JSON.stringify({ arguments: log.arguments, response: log.response }, null, 2)}</pre>
+                              </details>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                  </div>
+
                 </div>
               </div>
             )}
+
 
             {/* AI Prompts and Pipeline Logs Metadata (Trace logs at bottom) */}
             {aiPromptMeta && activeTab === "consolidated" && (
