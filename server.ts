@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import AdmZip from "adm-zip";
+import { createClient } from "@supabase/supabase-js";
+
 
 dotenv.config();
 
@@ -393,10 +395,566 @@ function extractRequests(itemsCount: any[]): any[] {
   return resultList;
 }
 
+// --- SUPABASE & PROJECTS SERVICE ENDPOINTS ---
+
+function getSupabaseServerClient(authHeader?: string) {
+  const url = process.env.SUPABASE_URL || "";
+  const key = process.env.SUPABASE_ANON_KEY || "";
+  if (!url || !key) {
+    throw new Error("Supabase credentials (SUPABASE_URL and SUPABASE_ANON_KEY) are not set in the server environment variables.");
+  }
+  const headers: Record<string, string> = {};
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    headers["Authorization"] = authHeader;
+  }
+  return createClient(url, key, {
+    auth: {
+      persistSession: false
+    },
+    global: {
+      headers
+    }
+  });
+}
+
+// Endpoint to fetch public credentials securely
+app.get("/api/supabase/config", (req, res) => {
+  res.json({
+    supabaseUrl: process.env.SUPABASE_URL || "",
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY || ""
+  });
+});
+
+// Endpoint: Synchronize or register user profile on auth trigger
+app.post("/api/users/sync", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized. Valid auth token required." });
+    }
+
+    const { error: dbError } = await client
+      .from("users")
+      .upsert({
+        id: user.id,
+        email: user.email || "",
+        created_at: user.created_at || new Date().toISOString()
+      });
+
+    if (dbError) {
+      if (dbError.message?.includes("relation") && dbError.message?.includes("does not exist")) {
+        return res.json({
+          status: "warning",
+          message: "The SQL schema tables were not created in Supabase yet. Please use the Setup Guide to initialize your database.",
+          needSchema: true
+        });
+      }
+      throw dbError;
+    }
+
+    return res.json({ status: "success", user });
+  } catch (err: any) {
+    console.error("User profile sync exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: List all projects
+app.get("/api/projects", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { data: projects, error: dbError } = await client
+      .from("projects")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (dbError) {
+      if (dbError.message?.includes("relation") && dbError.message?.includes("does not exist")) {
+        return res.json({ projects: [], needSchema: true });
+      }
+      throw dbError;
+    }
+
+    return res.json({ projects: projects || [] });
+  } catch (err: any) {
+    console.error("List projects exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Save/Create a Project
+app.post("/api/projects", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { projectName, collectionName, collectionItems, library, baseUrlEnv, injectBaseUrlFixture, addComments } = req.body;
+
+    const payload = {
+      user_id: user.id,
+      project_name: projectName || "Untitled Project",
+      collection_name: collectionName || "Uploaded Collection",
+      collection_items: collectionItems || [],
+      library: library || "requests",
+      base_url: baseUrlEnv || "",
+      inject_fixture: injectBaseUrlFixture ?? true,
+      add_comments: addComments ?? true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    const { data, error: dbError } = await client
+      .from("projects")
+      .insert([payload])
+      .select();
+
+    if (dbError) {
+      if (dbError.message?.includes("relation") && dbError.message?.includes("does not exist")) {
+        return res.status(400).json({ error: "Database tables are not initialized in Supabase. Please complete the SQL schema setup.", needSchema: true });
+      }
+      throw dbError;
+    }
+
+    return res.json({ project: data?.[0] });
+  } catch (err: any) {
+    console.error("Create project exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Fetch detailed Project contents
+app.get("/api/projects/:id", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { id } = req.params;
+
+    // 1. Fetch project meta
+    const { data: project, error: pError } = await client
+      .from("projects")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (pError) throw pError;
+
+    // 2. Fetch files
+    const { data: files } = await client
+      .from("generated_files")
+      .select("*")
+      .eq("project_id", id)
+      .order("generated_at", { ascending: false });
+
+    // 3. Fetch results
+    const { data: results } = await client
+      .from("execution_results")
+      .select("*")
+      .eq("project_id", id)
+      .order("executed_at", { ascending: false });
+
+    // 4. Fetch AI analyses
+    const { data: analyses } = await client
+      .from("ai_analysis")
+      .select("*")
+      .eq("project_id", id)
+      .order("created_at", { ascending: false });
+
+    return res.json({
+      project,
+      files: files || [],
+      results: results || [],
+      analyses: analyses || []
+    });
+  } catch (err: any) {
+    console.error("Fetch project detail exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Duplicate project
+app.post("/api/projects/:id/duplicate", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { id } = req.params;
+
+    // 1. Fetch original
+    const { data: project, error: pError } = await client
+      .from("projects")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (pError) throw pError;
+
+    // 2. Insert copy
+    const duplicatedPayload = {
+      user_id: user.id,
+      project_name: `${project.project_name} - Copy`,
+      collection_name: project.collection_name,
+      collection_items: project.collection_items || [],
+      library: project.library || "requests",
+      base_url: project.base_url || "",
+      inject_fixture: project.inject_fixture ?? true,
+      add_comments: project.add_comments ?? true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    const { data: copyResult, error: copyError } = await client
+      .from("projects")
+      .insert([duplicatedPayload])
+      .select();
+
+    if (copyError) throw copyError;
+    const duplicatedProject = copyResult[0];
+
+    // 3. Duplicate files
+    const { data: files } = await client
+      .from("generated_files")
+      .select("*")
+      .eq("project_id", id);
+
+    if (files && files.length > 0) {
+      const copies = files.map(f => ({
+        project_id: duplicatedProject.id,
+        file_name: f.file_name,
+        file_content: f.file_content,
+        generated_at: new Date().toISOString()
+      }));
+      await client.from("generated_files").insert(copies);
+    }
+
+    // 4. Duplicate results
+    const { data: results } = await client
+      .from("execution_results")
+      .select("*")
+      .eq("project_id", id);
+
+    if (results && results.length > 0) {
+      const copies = results.map(r => ({
+        project_id: duplicatedProject.id,
+        passed_count: r.passed_count,
+        failed_count: r.failed_count,
+        execution_time: r.execution_time,
+        report_json: r.report_json,
+        executed_at: new Date().toISOString()
+      }));
+      await client.from("execution_results").insert(copies);
+    }
+
+    // 5. Duplicate AI analyses
+    const { data: analyses } = await client
+      .from("ai_analysis")
+      .select("*")
+      .eq("project_id", id);
+
+    if (analyses && analyses.length > 0) {
+      const copies = analyses.map(a => ({
+        project_id: duplicatedProject.id,
+        error_message: a.error_message,
+        diagnosis: a.diagnosis,
+        recommendation: a.recommendation,
+        created_at: new Date().toISOString()
+      }));
+      await client.from("ai_analysis").insert(copies);
+    }
+
+    // 6. Duplicate in storage
+    try {
+      const { data: listData } = await client.storage
+        .from("pytest-assets")
+        .list(`${user.id}/${id}`);
+
+      if (listData && listData.length > 0) {
+        for (const file of listData) {
+          const { data: fileBlob } = await client.storage
+            .from("pytest-assets")
+            .download(`${user.id}/${id}/${file.name}`);
+
+          if (fileBlob) {
+            const buffer = Buffer.from(await fileBlob.arrayBuffer());
+            await client.storage
+              .from("pytest-assets")
+              .upload(`${user.id}/${duplicatedProject.id}/${file.name}`, buffer, {
+                contentType: file.name.endsWith(".zip") ? "application/zip" : "text/plain",
+                upsert: true
+              });
+          }
+        }
+      }
+    } catch (stError) {
+      console.warn("Silent storage replication failure during duplication:", stError);
+    }
+
+    return res.json({ project: duplicatedProject });
+  } catch (err: any) {
+    console.error("Duplicate project exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Delete project
+app.delete("/api/projects/:id", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { id } = req.params;
+
+    // 1. Delete DB project
+    const { error: dbError } = await client
+      .from("projects")
+      .delete()
+      .eq("id", id);
+
+    if (dbError) throw dbError;
+
+    // 2. Clear project Storage folder
+    try {
+      const { data: activeFiles } = await client.storage
+        .from("pytest-assets")
+        .list(`${user.id}/${id}`);
+
+      if (activeFiles && activeFiles.length > 0) {
+        const filePaths = activeFiles.map(f => `${user.id}/${id}/${f.name}`);
+        await client.storage.from("pytest-assets").remove(filePaths);
+      }
+    } catch (stError) {
+      console.warn("Silent storage cleanup failure during deletion:", stError);
+    }
+
+    return res.json({ status: "success" });
+  } catch (err: any) {
+    console.error("Delete project exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Save Pytest code generated files
+app.post("/api/projects/:id/save-files", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { id } = req.params;
+    const { pytestCode, modularFiles } = req.body;
+
+    if (!pytestCode) {
+      return res.status(400).json({ error: "Missing consolidated pytest script output code." });
+    }
+
+    // Save/refresh generated test suite records
+    await client.from("generated_files").delete().eq("project_id", id);
+
+    const inserts = [
+      {
+        project_id: id,
+        file_name: "test_all_apis.py",
+        file_content: pytestCode
+      }
+    ];
+
+    if (Array.isArray(modularFiles)) {
+      modularFiles.forEach(f => {
+        if (f.filename && f.content) {
+          inserts.push({
+            project_id: id,
+            file_name: f.filename,
+            file_content: f.content
+          });
+        }
+      });
+    }
+
+    const { error: dbError } = await client
+      .from("generated_files")
+      .insert(inserts);
+
+    if (dbError) throw dbError;
+
+    // Upload to Storage
+    const zip = new AdmZip();
+    zip.addFile("test_all_apis.py", Buffer.from(pytestCode));
+    if (Array.isArray(modularFiles)) {
+      modularFiles.forEach(f => {
+        if (f.filename && f.content) {
+          zip.addFile(f.filename, Buffer.from(f.content));
+        }
+      });
+    }
+    const readMeText = `# Translated Pytest Test Suite\n\nAutomatically migrated from Postman Collection using Gemini AI.\n`;
+    zip.addFile("README.md", Buffer.from(readMeText));
+    const zipBuffer = zip.toBuffer();
+
+    try {
+      await client.storage.createBucket("pytest-assets", { public: true });
+    } catch (e) {}
+
+    await client.storage
+      .from("pytest-assets")
+      .upload(`${user.id}/${id}/test_all_apis.py`, Buffer.from(pytestCode), {
+        contentType: "text/plain",
+        upsert: true
+      });
+
+    await client.storage
+      .from("pytest-assets")
+      .upload(`${user.id}/${id}/generated_pytest_suite.zip`, zipBuffer, {
+        contentType: "application/zip",
+        upsert: true
+      });
+
+    return res.json({ status: "success" });
+  } catch (err: any) {
+    console.error("Save files exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Save Execution Results
+app.post("/api/projects/:id/save-execution", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { id } = req.params;
+    const { passedCount, failedCount, executionTime, reportJson, outputLog } = req.body;
+
+    const { error: dbError } = await client
+      .from("execution_results")
+      .insert([
+        {
+          project_id: id,
+          passed_count: passedCount || 0,
+          failed_count: failedCount || 0,
+          execution_time: executionTime || 0,
+          report_json: typeof reportJson === "object" ? JSON.stringify(reportJson) : (reportJson || "{}"),
+          executed_at: new Date().toISOString()
+        }
+      ]);
+
+    if (dbError) throw dbError;
+
+    if (outputLog) {
+      try {
+        await client.storage.createBucket("pytest-assets", { public: true });
+      } catch (e) {}
+
+      await client.storage
+        .from("pytest-assets")
+        .upload(`${user.id}/${id}/execution_report.log`, Buffer.from(outputLog), {
+          contentType: "text/plain",
+          upsert: true
+        });
+    }
+
+    return res.json({ status: "success" });
+  } catch (err: any) {
+    console.error("Save execution result exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Save AI Failure Diagnostics
+app.post("/api/projects/:id/save-analysis", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).json({ error: "Unauthorized session." });
+    }
+
+    const { id } = req.params;
+    const { errorMessage, diagnosis, recommendation } = req.body;
+
+    const { error: dbError } = await client
+      .from("ai_analysis")
+      .insert([
+        {
+          project_id: id,
+          error_message: errorMessage || "",
+          diagnosis: diagnosis || "",
+          recommendation: recommendation || "",
+          created_at: new Date().toISOString()
+        }
+      ]);
+
+    if (dbError) throw dbError;
+
+    return res.json({ status: "success" });
+  } catch (err: any) {
+    console.error("Save AI analysis exception:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint: Retrieve dynamic asset download from Storage
+app.get("/api/storage/download", async (req, res) => {
+  try {
+    const client = getSupabaseServerClient(req.headers.authorization);
+    const { data: { user }, error: authError } = await client.auth.getUser();
+    if (authError || !user) {
+      return res.status(401).send("Unauthorized session.");
+    }
+
+    const { projectId, filename } = req.query;
+    if (!projectId || !filename) {
+      return res.status(400).send("Parameters missing.");
+    }
+
+    const storagePath = `${user.id}/${projectId}/${filename}`;
+
+    const { data, error } = await client.storage
+      .from("pytest-assets")
+      .download(storagePath);
+
+    if (error) {
+      console.error("Storage download failure:", error);
+      return res.status(404).send("File not found or access restricted: " + error.message);
+    }
+
+    const buffer = Buffer.from(await data.arrayBuffer());
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", filename.toString().endsWith(".zip") ? "application/zip" : "text/plain");
+    return res.send(buffer);
+  } catch (err: any) {
+    console.error("Download endpoint raised error:", err);
+    return res.status(500).send(err.message);
+  }
+});
+
 // Endpoint: Fetch sample collections in JSON
 app.get("/api/examples", (req, res) => {
   res.json(SAMPLE_COLLECTIONS);
 });
+
 
 // Endpoint: Fetch Postman Workspaces
 app.post("/api/postman/workspaces", async (req, res) => {

@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
+import AuthModal from "./components/AuthModal";
+import MyProjectsDashboard from "./components/MyProjectsDashboard";
+import { getSupabaseClient } from "./supabaseClient";
 import {
   UploadCloud,
   Key,
@@ -95,6 +98,149 @@ export default function App() {
     const stored = localStorage.getItem("pytestify_theme");
     return stored ? stored === "dark" : true; // Default to dark mode for professional dev experience
   });
+
+  // --- SUPABASE CLOUD STATES & ACTIONS ---
+  const [session, setSession] = useState<any>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [activeCloudProjectId, setActiveCloudProjectId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const initAuth = async () => {
+      const supabase = await getSupabaseClient();
+      if (!supabase || !active) return;
+      
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      if (active) {
+        setSession(currentSession);
+        if (currentSession) {
+          fetch("/api/users/sync", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${currentSession.access_token}`
+            }
+          }).catch(err => console.warn("Silent profile sync err:", err));
+        } else {
+          // If no active session, pop-up login unless user skipped it previously
+          const skipped = localStorage.getItem("pytestify_skipped_login") === "true";
+          if (!skipped) {
+            setIsAuthModalOpen(true);
+          }
+        }
+      }
+
+      // Keep session listener in sync
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
+        if (active) {
+          setSession(newSession);
+        }
+      });
+
+      return () => {
+        subscription.unsubscribe();
+      };
+    };
+    initAuth();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const getOrCreateActiveProject = async (): Promise<string | null> => {
+    if (!session) return null;
+    if (activeCloudProjectId) return activeCloudProjectId;
+
+    // Auto-create matching active collection name
+    const projName = collectionName || "New Pytest Migration";
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({
+          projectName: projName,
+          collectionName: collectionName || "Uploaded Collection",
+          collectionItems,
+          library,
+          baseUrlEnv,
+          injectBaseUrlFixture,
+          addComments
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.project?.id) {
+        setActiveCloudProjectId(data.project.id);
+        return data.project.id;
+      }
+    } catch (e) {
+      console.error("Silent creation failure:", e);
+    }
+    return null;
+  };
+
+  const handleSelectProject = async (projId: string) => {
+    if (!session) return;
+    try {
+      const res = await fetch(`/api/projects/${projId}`, {
+        headers: {
+          "Authorization": `Bearer ${session.access_token}`
+        }
+      });
+      const data = await res.json();
+      if (res.ok && data.project) {
+        setCollectionName(data.project.project_name);
+        setCollectionDescription(data.project.collection_name || "");
+        setCollectionItems(data.project.collection_items || []);
+        setLibrary(data.project.library || "requests");
+        setBaseUrlEnv(data.project.base_url || "");
+        setInjectBaseUrlFixture(data.project.inject_fixture ?? true);
+        setAddComments(data.project.add_comments ?? true);
+
+        if (data.files && data.files.length > 0) {
+          const mainFile = data.files.find((f: any) => f.file_name === "test_all_apis.py");
+          if (mainFile) {
+            setPytestCode(mainFile.file_content);
+          }
+          const modFiles = data.files.filter((f: any) => f.file_name !== "test_all_apis.py").map((f: any) => ({
+            filename: f.file_name,
+            content: f.file_content
+          }));
+          setModularFiles(modFiles);
+        } else {
+          setPytestCode("");
+          setModularFiles([]);
+        }
+
+        if (data.results && data.results.length > 0) {
+          const latestRes = data.results[0];
+          let parsedFailures = [];
+          try {
+            const report = JSON.parse(latestRes.report_json);
+            parsedFailures = report.failures || [];
+          } catch (e) {}
+
+          setExecResult({
+            total: latestRes.passed_count + latestRes.failed_count,
+            passed: latestRes.passed_count,
+            failed: latestRes.failed_count,
+            execution_time: Number(latestRes.execution_time),
+            output_log: `Captured cloud execution results logged at: ${latestRes.executed_at}\n===================================`,
+            failures: parsedFailures
+          });
+        } else {
+          setExecResult(null);
+        }
+
+        setErrorMessage("");
+        setActiveCloudProjectId(projId);
+        setActiveRailTab("explorer");
+      }
+    } catch (err: any) {
+      setErrorMessage("Failed to load project details: " + err.message);
+    }
+  };
 
   const [collectionSource, setCollectionSource] = useState<"upload" | "postman" | "sample" | "settings">("upload");
   const [collectionName, setCollectionName] = useState<string>("");
@@ -647,6 +793,26 @@ export default function App() {
       setAiPromptMeta(data.ai_prompt_meta || null);
       setActiveTab("consolidated");
       setSelectedFileIndex(0);
+
+      // Auto save if user is logged in
+      if (session) {
+        setTimeout(async () => {
+          const pId = await getOrCreateActiveProject();
+          if (pId) {
+            await fetch(`/api/projects/${pId}/save-files`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${session.access_token}`
+              },
+              body: JSON.stringify({
+                pytestCode: data.pytest_code,
+                modularFiles: data.modular_files
+              })
+            }).catch(e => console.warn("Auto-save files error:", e));
+          }
+        }, 50);
+      }
     } catch (err: any) {
       setErrorMessage(err.message);
     } finally {
@@ -677,6 +843,46 @@ export default function App() {
       }
       setExecResult(data);
       setActiveTab("run");
+
+      // Auto save if user is logged in
+      if (session) {
+        setTimeout(async () => {
+          const pId = await getOrCreateActiveProject();
+          if (pId) {
+            await fetch(`/api/projects/${pId}/save-execution`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${session.access_token}`
+              },
+              body: JSON.stringify({
+                passedCount: data.passed,
+                failedCount: data.failed,
+                executionTime: data.execution_time,
+                reportJson: data,
+                outputLog: data.output_log
+              })
+            }).catch(e => console.warn("Auto-save execution error:", e));
+
+            if (data.failures && data.failures.length > 0) {
+              for (const f of data.failures) {
+                await fetch(`/api/projects/${pId}/save-analysis`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${session.access_token}`
+                  },
+                  body: JSON.stringify({
+                    errorMessage: f.error_message || "",
+                    diagnosis: f.probable_cause || "",
+                    recommendation: f.recommendations || ""
+                  })
+                }).catch(e => console.warn("Auto-save analysis failure:", e));
+              }
+            }
+          }
+        }, 50);
+      }
     } catch (err: any) {
       alert(`Execution simulation error: ${err.message}`);
     } finally {
@@ -750,7 +956,7 @@ export default function App() {
             return <span key={i} className="text-neutral-500 italic">{part}</span>;
           }
           if (part === 'expect' || part === 'test') {
-            return <span key={i} className={isDarkMode ? "text-orange-400 font-semibold" : "text-orange-600 font-semibold"}>{part}</span>;
+            return <span key={i} className={isDarkMode ? "text-indigo-400 font-semibold" : "text-indigo-600 font-semibold"}>{part}</span>;
           }
           if (part === 'function') {
             return <span key={i} className={isDarkMode ? "text-purple-400 font-medium" : "text-[#8c29b3] font-medium"}>{part}</span>;
@@ -779,12 +985,12 @@ export default function App() {
     : "bg-white border-neutral-300 text-neutral-800";
 
   return (
-    <div className={`min-h-screen flex flex-col font-sans transition-colors duration-200 antialiased selection:bg-[#ef5b25]/20 selection:text-orange-500 ${bgMain}`}>
+    <div className={`min-h-screen flex flex-col font-sans transition-colors duration-200 antialiased selection:bg-indigo-500/10 selection:text-indigo-500 ${bgMain}`}>
       
       {/* Top Editorial System Bar (Highly Technical and Sleek) */}
       <div className={`${isDarkMode ? "bg-[#0b241d] text-[#beebd8]" : "bg-[#0c3127] text-[#dfebd5]"} text-[11px] font-mono py-1 px-4 tracking-wider flex justify-between items-center z-50 transition-colors`}>
         <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#ef5b25] animate-pulse"></span>
+          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
           <span>POSTMAN-TO-PYTEST AUTO-MIGRATOR COMPREHENSIVE SUITE</span>
         </div>
         <div className="hidden md:flex items-center gap-6">
@@ -798,7 +1004,7 @@ export default function App() {
       <header className={`border-b ${borderCol} ${isDarkMode ? "bg-[#111215]" : "bg-[#fbfbfa]"} py-3 px-6 sticky top-0 z-40 transition-colors shadow-xs`}>
         <div className="max-w-8xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-[#ef5b25] rounded-lg text-white shadow-sm flex items-center justify-center">
+            <div className="p-2 bg-indigo-600 rounded-lg text-white shadow-sm flex items-center justify-center">
               <Zap className="h-5 w-5 fill-white/10" />
             </div>
             <div>
@@ -820,7 +1026,7 @@ export default function App() {
             {/* Quick Dark Mode toggle in the top Bar */}
             <button
               onClick={() => setIsDarkMode(!isDarkMode)}
-              className={`p-2 rounded-lg border ${borderCol} ${isDarkMode ? "hover:bg-neutral-800 text-yellow-400" : "hover:bg-neutral-100 text-[#ef5b25]"} transition-all duration-200`}
+              className={`p-2 rounded-lg border ${borderCol} ${isDarkMode ? "hover:bg-neutral-800 text-yellow-400" : "hover:bg-neutral-100 text-indigo-500"} transition-all duration-200`}
               title={isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
             >
               {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
@@ -835,15 +1041,53 @@ export default function App() {
               Reset Samples
             </button>
 
-            <a
-              href="https://ai.studio/build"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-3.5 py-2 bg-[#ef5b25] text-white rounded-lg text-xs font-mono font-bold hover:bg-[#d84e1b] transition duration-200 flex items-center gap-1.5 shadow-sm"
-            >
-              AI Build Studio
-              <ExternalLink className="h-3 w-3" />
-            </a>
+
+
+            {/* Dynamic Supabase Auth State Controls */}
+            <div className={`flex items-center gap-2.5 border-l ${borderCol} pl-3 ml-1`}>
+              {!session ? (
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-1 text-[10px] font-mono tracking-widest text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded-lg font-bold uppercase">
+                    Guest Mode
+                  </span>
+                  <button
+                    onClick={() => setIsAuthModalOpen(true)}
+                    className="px-3 py-2 text-xs font-mono font-bold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition shadow-sm cursor-pointer"
+                  >
+                    Sign In
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-1 text-[10px] font-mono tracking-widest text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg font-bold uppercase flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+                    Logged In
+                  </span>
+                  
+                  <div className={`px-2.5 py-1.5 rounded-lg border ${borderCol} ${bgAccent} flex items-center gap-1.5 max-w-[150px]`}>
+                    <span className="text-[11px] font-mono font-bold truncate text-neutral-300" title={session.user?.email}>
+                      {session.user?.email?.split('@')[0]}
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={async () => {
+                      const s = await getSupabaseClient();
+                      if (s) {
+                        await s.auth.signOut();
+                        setActiveCloudProjectId(null);
+                        localStorage.removeItem("pytestify_skipped_login");
+                      }
+                    }}
+                    className={`p-2 rounded-lg border border-red-500/20 bg-red-500/5 hover:bg-red-500/15 text-red-400 transition cursor-pointer`}
+                    title="Sign Out Workspace"
+                  >
+                    {/* Compact Sign Out door symbol using small rotated line */}
+                    <span className="text-[11px] font-mono font-bold px-0.5">OUT</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -855,7 +1099,7 @@ export default function App() {
         <section className={`w-14 items-center flex xl:flex-col justify-start border-r ${borderCol} ${bgSide} py-4 px-2 gap-5 text-center shrink-0`}>
           <button
             onClick={() => { setActiveRailTab("explorer"); if (collectionSource === "settings") setCollectionSource("upload"); }}
-            className={`p-2.5 rounded-xl transition ${activeRailTab === "explorer" ? "bg-[#ef5b25] text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
+            className={`p-2.5 rounded-xl transition ${activeRailTab === "explorer" ? "bg-indigo-600 text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
             title="Collection Explorer"
           >
             <Folder className="h-5 w-5" />
@@ -863,10 +1107,27 @@ export default function App() {
           
           <button
             onClick={() => { setActiveRailTab("settings"); setCollectionSource("settings"); }}
-            className={`p-2.5 rounded-xl transition ${activeRailTab === "settings" ? "bg-[#ef5b25] text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
+            className={`p-2.5 rounded-xl transition ${activeRailTab === "settings" ? "bg-indigo-600 text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
             title="Pytest Configurations"
           >
             <Sliders className="h-5 w-5" />
+          </button>
+
+          <button
+            onClick={() => {
+              if (!session) {
+                setIsAuthModalOpen(true);
+              } else {
+                setActiveRailTab("dashboard");
+              }
+            }}
+            className={`p-2.5 rounded-xl transition relative ${activeRailTab === "dashboard" ? "bg-indigo-600 text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
+            title="My Cloud Projects (Database)"
+          >
+            <Database className="h-5 w-5" />
+            {!session && (
+              <span className="absolute top-1 right-1 w-2 h-2 bg-amber-500 rounded-full border border-neutral-900"></span>
+            )}
           </button>
 
 
@@ -887,13 +1148,32 @@ export default function App() {
           
           {/* PANE 1: SOURCE MANAGEMENT & TREE TREE DIRECTORY (col-span-4) */}
           <div className="lg:col-span-4 flex flex-col p-4 md:p-5 gap-5">
-            
-            {/* Source Tab Header */}
-            <div>
-              <div className="flex justify-between items-center">
-                <span className="text-[10px] font-mono uppercase tracking-widest text-orange-500 font-bold">PANE 1 • CLIENT INTAKE</span>
-                <span className="text-[10px] font-mono text-neutral-400">SELECT IMPORT SOURCE</span>
-              </div>
+            {activeRailTab === "dashboard" && session ? (
+              <MyProjectsDashboard
+                isDarkMode={isDarkMode}
+                authToken={session?.access_token || ""}
+                activeProjectId={activeCloudProjectId}
+                onSelectProject={handleSelectProject}
+                onProjectDeselect={() => setActiveCloudProjectId(null)}
+                onCreateNewProject={(pId) => {
+                  setActiveCloudProjectId(pId);
+                  setActiveRailTab("explorer");
+                }}
+              />
+            ) : (
+              <>
+                {/* Source Tab Header */}
+                <div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] font-mono uppercase tracking-widest text-[#6366f1] font-bold">PANE 1 • CLIENT INTAKE</span>
+                    {activeCloudProjectId ? (
+                      <span className="px-1.5 py-0.5 text-[8px] font-mono font-bold uppercase rounded bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+                        CLOUD SYNCED
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-mono text-neutral-400">SELECT IMPORT SOURCE</span>
+                    )}
+                  </div>
               <h2 className={`text-sm font-display font-bold ${textTitle} mt-0.5`}>
                 Source API Repository
               </h2>
@@ -906,7 +1186,7 @@ export default function App() {
                 onClick={() => { setCollectionSource("upload"); setActiveRailTab("explorer"); }}
                 className={`py-1.5 text-[10px] sm:text-xs font-medium rounded-md transition-all ${
                   collectionSource === "upload"
-                    ? "bg-[#ef5b25] text-white shadow-sm"
+                    ? "bg-indigo-600 text-white shadow-sm"
                     : isDarkMode ? "text-neutral-400 hover:text-neutral-200" : "text-neutral-500 hover:text-neutral-800"
                 }`}
               >
@@ -917,7 +1197,7 @@ export default function App() {
                 onClick={() => { setCollectionSource("postman"); setActiveRailTab("explorer"); }}
                 className={`py-1.5 text-[10px] sm:text-xs font-medium rounded-md transition-all ${
                   collectionSource === "postman"
-                    ? "bg-[#ef5b25] text-white shadow-sm"
+                    ? "bg-indigo-600 text-white shadow-sm"
                     : isDarkMode ? "text-neutral-400 hover:text-neutral-200" : "text-neutral-500 hover:text-neutral-800"
                 }`}
               >
@@ -928,7 +1208,7 @@ export default function App() {
                 onClick={() => { setCollectionSource("sample"); setActiveRailTab("explorer"); }}
                 className={`py-1.5 text-[10px] sm:text-xs font-medium rounded-md transition-all ${
                   collectionSource === "sample"
-                    ? "bg-[#ef5b25] text-white shadow-sm"
+                    ? "bg-indigo-600 text-white shadow-sm"
                     : isDarkMode ? "text-neutral-400 hover:text-neutral-200" : "text-neutral-500 hover:text-neutral-800"
                 }`}
               >
@@ -947,7 +1227,7 @@ export default function App() {
                   onClick={() => fileInputRef.current?.click()}
                   className={`border border-dashed rounded-lg p-5 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2 group ${
                     dragOver
-                      ? "border-[#ef5b25] bg-[#ef5b25]/5"
+                      ? "border-indigo-500 bg-indigo-500/5"
                       : isDarkMode 
                       ? "border-neutral-700 bg-neutral-900/40 hover:bg-neutral-900/80" 
                       : "border-neutral-300 bg-white hover:bg-neutral-50"
@@ -960,7 +1240,7 @@ export default function App() {
                     onChange={handleFileChange}
                     className="hidden"
                   />
-                  <div className={`p-2 rounded-full ${isDarkMode ? "bg-neutral-800" : "bg-neutral-100"} text-[#ef5b25] group-hover:scale-105 transition-transform duration-200`}>
+                  <div className={`p-2 rounded-full ${isDarkMode ? "bg-neutral-800" : "bg-neutral-100"} text-indigo-500 group-hover:scale-105 transition-transform duration-200`}>
                     <UploadCloud className="h-5 w-5" />
                   </div>
                   <div>
@@ -984,12 +1264,12 @@ export default function App() {
                         placeholder="PMAK-xxxxxx-xxxx-xxxx"
                         value={postmanApiKey}
                         onChange={(e) => setPostmanApiKey(e.target.value)}
-                        className={`w-full text-xs pl-3 pr-20 py-2 border rounded-md focus:outline-none focus:ring-1 focus:ring-[#ef5b25] font-mono ${selectStyle}`}
+                        className={`w-full text-xs pl-3 pr-20 py-2 border rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono ${selectStyle}`}
                       />
                       <button
                         onClick={handleConnectPostman}
                         disabled={isPostmanKeyLoading}
-                        className="absolute right-1 top-1 bottom-1 px-2.5 bg-[#ef5b25] hover:bg-[#d84e1b] text-white rounded text-[9px] font-mono font-bold transition flex items-center"
+                        className="absolute right-1 top-1 bottom-1 px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[9px] font-mono font-bold transition flex items-center"
                       >
                         {isPostmanKeyLoading ? "Sync..." : "Fetch"}
                       </button>
@@ -1031,7 +1311,7 @@ export default function App() {
                     <div className="flex flex-col gap-1 pt-2 border-t border-neutral-800/20">
                       <div className="text-[9px] font-mono text-neutral-400 uppercase flex justify-between items-center">
                         <span>Collections ({filteredCollections.length})</span>
-                        {isCollectionsLoading && <RefreshCw className="h-2.5 w-2.5 animate-spin text-[#ef5b25]" />}
+                        {isCollectionsLoading && <RefreshCw className="h-2.5 w-2.5 animate-spin text-indigo-500" />}
                       </div>
                       <div className="max-h-36 overflow-y-auto border border-neutral-800/40 rounded-lg divide-y divide-neutral-800/45 bg-[#0f1011]">
                         {filteredCollections.map((col) => (
@@ -1040,12 +1320,12 @@ export default function App() {
                             onClick={() => handleSelectPostmanCollection(col.uid)}
                             className={`w-full text-left p-2 transition flex justify-between items-center text-[11px] ${
                               selectedCollectionUid === col.uid
-                                ? "bg-[#ef5b25]/10 text-orange-400 font-semibold"
+                                ? "bg-indigo-500/10 text-indigo-400 font-semibold"
                                 : "hover:bg-neutral-800 text-neutral-400"
                             }`}
                           >
                             <span className="truncate pr-1">{col.name}</span>
-                            <span className="text-[8px] font-mono px-1.5 py-0.5 bg-[#ef5b25] text-white rounded">Import</span>
+                            <span className="text-[8px] font-mono px-1.5 py-0.5 bg-indigo-600 text-white rounded">Import</span>
                           </button>
                         ))}
                       </div>
@@ -1065,16 +1345,16 @@ export default function App() {
                       <button
                         key={sample.id || sample.name}
                         onClick={() => handleSelectSample(sample)}
-                        className={`text-left p-2 border rounded-lg transition duration-200 hover:border-orange-500 hover:bg-[#ef5b25]/5 group ${
+                        className={`text-left p-2 border rounded-lg transition duration-200 hover:border-indigo-500 hover:bg-indigo-500/5 group ${
                           collectionName === sample.name
-                            ? "border-[#ef5b25] bg-[#ef5b25]/10 text-orange-500"
+                            ? "border-indigo-500 bg-indigo-500/10 text-indigo-600"
                             : isDarkMode 
                               ? "border-neutral-700/80 bg-neutral-900/30" 
                               : "border-neutral-200 bg-white"
                         }`}
                       >
-                        <h4 className={`text-xs font-bold ${isDarkMode ? "text-neutral-200" : "text-neutral-800"} group-hover:text-[#ef5b25]`}>{sample.name}</h4>
-                        <span className="text-[9px] text-[#ef5b25]/90 font-mono inline-block mt-1">Load specimen endpoints →</span>
+                        <h4 className={`text-xs font-bold ${isDarkMode ? "text-neutral-200" : "text-neutral-800"} group-hover:text-indigo-600`}>{sample.name}</h4>
+                        <span className="text-[9px] text-indigo-500/95 font-mono inline-block mt-1">Load specimen endpoints →</span>
                       </button>
                     ))}
                   </div>
@@ -1119,7 +1399,7 @@ export default function App() {
                           type="checkbox"
                           checked={injectBaseUrlFixture}
                           onChange={(e) => setInjectBaseUrlFixture(e.target.checked)}
-                          className="rounded border-neutral-700 text-[#ef5b25] focus:ring-[#ef5b25] h-3.5 w-3.5 mt-0.5"
+                          className="rounded border-neutral-700 text-indigo-500 focus:ring-indigo-500 h-3.5 w-3.5 mt-0.5"
                         />
                         <div className={`text-[11px] leading-tight ${isDarkMode ? "text-neutral-400" : "text-neutral-600"}`}>
                           <span className={`font-semibold block ${isDarkMode ? "text-neutral-200" : "text-neutral-850"}`}>Synthesize conftest.py</span>
@@ -1132,7 +1412,7 @@ export default function App() {
                           type="checkbox"
                           checked={addComments}
                           onChange={(e) => setAddComments(e.target.checked)}
-                          className="rounded border-neutral-700 text-[#ef5b25] focus:ring-[#ef5b25] h-3.5 w-3.5 mt-0.5"
+                          className="rounded border-neutral-700 text-indigo-500 focus:ring-indigo-500 h-3.5 w-3.5 mt-0.5"
                         />
                         <div className={`text-[11px] leading-tight ${isDarkMode ? "text-neutral-400" : "text-neutral-600"}`}>
                           <span className={`font-semibold block ${isDarkMode ? "text-neutral-200" : "text-neutral-850"}`}>Include source line commentary</span>
@@ -1189,7 +1469,7 @@ export default function App() {
               <div className={`border ${borderCol} rounded-xl overflow-hidden ${bgAccent} flex-1 flex flex-col min-h-[190px]`}>
                 <div className={`px-4 py-2 border-b ${borderCol} ${isDarkMode ? "bg-neutral-900" : "bg-neutral-50"} text-[9px] font-mono uppercase tracking-widest text-neutral-400 flex justify-between items-center`}>
                   <div className="flex items-center gap-1">
-                    <Database className="h-3.5 w-3.5 text-orange-500" />
+                    <Database className="h-3.5 w-3.5 text-indigo-500" />
                     <span>Tree Explorer</span>
                   </div>
                   <span>{collectionItems.length} Requests</span>
@@ -1212,8 +1492,8 @@ export default function App() {
                         className={`w-full text-left p-2 rounded-lg flex items-center justify-between gap-2.5 border transition ${
                           isSelected 
                             ? isDarkMode
-                              ? "bg-neutral-800/50 border-[#ef5b25]/60 text-white shadow-xs"
-                              : "bg-neutral-100 border-[#ef5b25]/60 text-neutral-950 font-medium"
+                              ? "bg-neutral-800/50 border-indigo-500/65 text-white shadow-xs"
+                              : "bg-neutral-100 border-indigo-500/65 text-neutral-950 font-medium"
                             : "border-transparent hover:bg-neutral-800/10"
                         }`}
                       >
@@ -1238,7 +1518,7 @@ export default function App() {
               className={`w-full py-3.5 rounded-xl font-mono font-bold text-xs uppercase tracking-wider text-white transition transform flex items-center justify-center gap-2 ${
                 collectionItems.length === 0
                   ? "bg-neutral-800 text-neutral-500 cursor-not-allowed border border-neutral-700/50"
-                  : "bg-gradient-to-r from-[#ef5b25] to-[#f27447] hover:from-[#e04e18] hover:to-[#ef5b25] active:scale-98 shadow-md"
+                  : "bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-700 hover:to-indigo-600 active:scale-98 shadow-md"
               }`}
             >
               {isMigrating ? (
@@ -1248,11 +1528,13 @@ export default function App() {
                 </>
               ) : (
                 <>
-                  <Sparkles className="h-4 w-4 text-yellow-300 animate-pulse fill-yellow-300/20" />
+                  <Sparkles className="h-4 w-4 text-indigo-300 animate-pulse fill-indigo-300/25" />
                   Compile Pytest Suite
                 </>
               )}
             </button>
+              </>
+            )}
           </div>
 
           {/* PANE 2: POSTMAN REQUEST SPEC TAB INTERFACE (col-span-8 - Left nested) AND DETAILED CODE WRITER */}
@@ -1261,7 +1543,7 @@ export default function App() {
             {/* Top Workspace Section 2 Header */}
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
-                <span className="text-[10px] font-mono uppercase tracking-widest text-[#ef5b25] font-bold block">PANE 2 • DEVELOPER SPECIFICATION TAB</span>
+                <span className="text-[10px] font-mono uppercase tracking-widest text-[#6366f1] font-bold block">PANE 2 • DEVELOPER SPECIFICATION TAB</span>
                 <h2 className={`text-base font-display font-medium ${textTitle} mt-0.5`}>
                   {collectionName || "Empty Workspace Instance"}
                 </h2>
@@ -1272,7 +1554,7 @@ export default function App() {
                   onClick={() => setActiveTab("consolidated")}
                   className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
                     activeTab === "consolidated"
-                      ? "border-orange-500 text-orange-500 font-bold"
+                      ? "border-indigo-500 text-indigo-500 font-bold"
                       : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
                   }`}
                 >
@@ -1283,7 +1565,7 @@ export default function App() {
                   onClick={() => setActiveTab("modular")}
                   className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
                     activeTab === "modular"
-                      ? "border-orange-500 text-orange-500 font-bold"
+                      ? "border-indigo-500 text-indigo-500 font-bold"
                       : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
                   }`}
                 >
@@ -1294,7 +1576,7 @@ export default function App() {
                   onClick={() => setActiveTab("run")}
                   className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
                     activeTab === "run"
-                      ? "border-orange-500 text-orange-500 font-bold"
+                      ? "border-indigo-500 text-indigo-500 font-bold"
                       : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
                   }`}
                 >
@@ -1305,7 +1587,7 @@ export default function App() {
                   onClick={() => setActiveTab("mcp")}
                   className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
                     activeTab === "mcp"
-                      ? "border-orange-500 text-orange-500 font-bold"
+                      ? "border-indigo-500 text-indigo-500 font-bold"
                       : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
                   }`}
                 >
@@ -1341,7 +1623,7 @@ export default function App() {
                   </div>
                   <button
                     onClick={handleMigrate}
-                    className="bg-[#ef5b25]/10 hover:bg-[#ef5b25]/15 text-[#ef5b25] border border-[#ef5b25]/30 font-mono font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2 tracking-wide text-xs"
+                    className="bg-indigo-600/10 hover:bg-indigo-600/15 text-indigo-500 border border-indigo-500/30 font-mono font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2 tracking-wide text-xs"
                   >
                     <Send className="h-3 w-3 translate-x-px" />
                     Convert
@@ -1354,8 +1636,8 @@ export default function App() {
                     onClick={() => setReqActiveTab("chai")}
                     className={`py-2 px-1 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
                       reqActiveTab === "chai"
-                        ? `border-[#ef5b25] ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
-                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-[#ef5b25]" : "hover:text-black"}`
+                        ? `border-indigo-500 ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
+                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-indigo-500" : "hover:text-black"}`
                     }`}
                   >
                     Workspace Tests ({selectedRequest.event?.[0]?.script?.exec?.length || 0})
@@ -1364,8 +1646,8 @@ export default function App() {
                     onClick={() => setReqActiveTab("headers")}
                     className={`py-2 px-1 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
                       reqActiveTab === "headers"
-                        ? `border-[#ef5b25] ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
-                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-[#ef5b25]" : "hover:text-black"}`
+                        ? `border-indigo-500 ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
+                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-indigo-500" : "hover:text-black"}`
                     }`}
                   >
                     Headers ({selectedRequest.request.headers?.length || 0})
@@ -1374,8 +1656,8 @@ export default function App() {
                     onClick={() => setReqActiveTab("body")}
                     className={`py-2 px-1 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
                       reqActiveTab === "body"
-                        ? `border-[#ef5b25] ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
-                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-[#ef5b25]" : "hover:text-black"}`
+                        ? `border-indigo-500 ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
+                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-indigo-500" : "hover:text-black"}`
                     }`}
                   >
                     JSON Body Setup
@@ -1417,7 +1699,7 @@ export default function App() {
                           <tbody className={`divide-y ${isDarkMode ? "divide-neutral-800/40 text-neutral-300" : "divide-neutral-200 text-neutral-700"}`}>
                             {selectedRequest.request.headers.map((h, i) => (
                               <tr key={i} className={isDarkMode ? "hover:bg-neutral-800/20" : "hover:bg-neutral-200/40"}>
-                                <td className={`py-1.5 pr-4 ${isDarkMode ? "text-orange-400" : "text-orange-600"} select-all`}>{h.key}</td>
+                                <td className={`py-1.5 pr-4 ${isDarkMode ? "text-indigo-400" : "text-indigo-600"} select-all`}>{h.key}</td>
                                 <td className="py-1.5 select-all text-neutral-500">{h.value}</td>
                               </tr>
                             ))}
@@ -1459,7 +1741,7 @@ export default function App() {
               <div className="flex flex-col gap-5">
                 {!pytestCode ? (
                   <div className={`rounded-2xl border ${borderCol} ${bgAccent} p-12 text-center flex flex-col items-center justify-center gap-4 shadow-sm`}>
-                    <div className="p-3 bg-[#ef5b25]/10 rounded-full text-[#ef5b25] border border-[#ef5b25]/20 animate-pulse">
+                    <div className="p-3 bg-indigo-500/10 rounded-full text-indigo-500 border border-indigo-500/20 animate-pulse">
                       <Code className="h-7 w-7" />
                     </div>
                     <div>
@@ -1503,7 +1785,7 @@ export default function App() {
                         </button>
                         <button
                           onClick={handleDownloadZip}
-                          className="px-3.5 py-1.5 bg-[#ef5b25] hover:bg-[#d84e1b] rounded-lg text-[11px] font-mono font-bold text-white transition flex items-center gap-1.5 shadow-sm"
+                          className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-[11px] font-mono font-bold text-white transition flex items-center gap-1.5 shadow-sm"
                         >
                           <Download className="h-3 w-3" />
                           Download Suite (ZIP)
@@ -1568,17 +1850,17 @@ export default function App() {
                     {/* Assertion mapping explanations to see the mechanics */}
                     {migrations.length > 0 && (
                       <div className={`p-4 border ${borderCol} rounded-xl ${bgCard} flex flex-col gap-4 mt-2`}>
-                        <h3 className="text-xs font-mono uppercase tracking-widest text-[#ef5b25] font-bold flex items-center gap-2">
+                        <h3 className="text-xs font-mono uppercase tracking-widest text-indigo-550 font-bold flex items-center gap-2">
                           <ShieldCheck className="h-4.5 w-4.5" />
                           Assertion Traceability Map
                         </h3>
                         <div className="grid grid-cols-1 gap-3.5 max-h-[300px] overflow-y-auto">
                           {migrations.map((mig, key) => (
                             <div key={key} className={`border ${borderCol} rounded-lg p-3 ${bgAccent} flex flex-col gap-2.5 text-xs`}>
-                              <div className="flex justify-between items-center px-2 py-1 rounded bg-[#ef5b25]/5 border border-[#ef5b25]/10">
+                              <div className="flex justify-between items-center px-2 py-1 rounded bg-indigo-500/5 border border-indigo-500/10">
                                 <div className="flex items-center gap-2 font-mono">
                                   <span className="font-bold text-[11px]">{mig.requestName}</span>
-                                  <span className="px-1 py-0.5 rounded text-[8px] text-white uppercase bg-[#ef5b25]">
+                                  <span className="px-1 py-0.5 rounded text-[8px] text-white uppercase bg-indigo-600">
                                     {mig.method}
                                   </span>
                                 </div>
@@ -1598,7 +1880,7 @@ export default function App() {
                                   </div>
                                 </div>
                                 <div className="flex flex-col gap-1">
-                                  <span className="text-[9px] font-mono text-[#ef5b25] uppercase font-bold">Generated Pytest Assert</span>
+                                  <span className="text-[9px] font-mono text-indigo-500 uppercase font-bold">Generated Pytest Assert</span>
                                   <div className={`p-2 rounded font-mono text-[10px] border ${
                                     isDarkMode 
                                       ? "bg-neutral-900 border-neutral-800" 
@@ -1625,7 +1907,7 @@ export default function App() {
               <div className="flex flex-col gap-5">
                 {!pytestCode || modularFiles.length === 0 ? (
                   <div className={`rounded-xl border ${borderCol} ${bgAccent} p-12 text-center flex flex-col items-center justify-center gap-4`}>
-                    <div className="p-3 bg-[#ef5b25]/10 rounded-full text-[#ef5b25] border border-[#ef5b25]/20">
+                    <div className="p-3 bg-indigo-500/10 rounded-full text-indigo-500 border border-indigo-500/20">
                       <Layers className="h-6 w-6" />
                     </div>
                     <div>
@@ -1639,7 +1921,7 @@ export default function App() {
                   <div className="flex flex-col gap-4">
                     <div className={`flex flex-col sm:flex-row justify-between sm:items-center gap-3 bg-[#1d1f23] p-4 rounded-xl border ${borderCol}`}>
                       <div>
-                        <h3 className="text-xs font-bold font-mono uppercase tracking-wide text-[#ef5b25]">
+                        <h3 className="text-xs font-bold font-mono uppercase tracking-wide text-indigo-500">
                           PRO DISTRIBUTION FILE LIST
                         </h3>
                         <p className="text-[11px] text-neutral-400 mt-0.5 leading-tight">
@@ -1648,7 +1930,7 @@ export default function App() {
                       </div>
                       <button
                         onClick={handleDownloadZip}
-                        className="px-3.5 py-1.5 bg-[#ef5b25] hover:bg-[#d84e1b] text-white font-mono rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow"
+                        className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-mono rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow"
                       >
                         <Download className="h-3.5 w-3.5" />
                         Download ZIP
@@ -1666,7 +1948,7 @@ export default function App() {
                             onClick={() => setSelectedFileIndex(idx)}
                             className={`w-full text-left p-2 rounded font-mono text-[10.5px] transition flex justify-between items-center ${
                               selectedFileIndex === idx
-                                ? "bg-[#ef5b25]/10 text-orange-600 font-bold border-l-2 border-[#ef5b25] pl-1.5"
+                                ? "bg-indigo-500/10 text-indigo-600 font-bold border-l-2 border-indigo-500 pl-1.5"
                                 : `${isDarkMode ? "hover:bg-neutral-800/55 text-neutral-400" : "hover:bg-neutral-200 text-neutral-600"}`
                             }`}
                           >
@@ -1679,7 +1961,7 @@ export default function App() {
                       <div className={`md:col-span-8 flex flex-col ${isDarkMode ? "bg-[#121314] border-neutral-800" : "bg-neutral-50 border-neutral-200"} rounded-xl border shadow-sm overflow-hidden text-xs`}>
                         <div className={`border-b ${isDarkMode ? "bg-neutral-900/60 border-neutral-800 text-neutral-300" : "bg-neutral-100 border-neutral-200 text-neutral-700"} px-4 py-2.5 flex justify-between items-center font-mono`}>
                           <span className="font-semibold flex items-center gap-2">
-                            <FileCode className="h-3.5 w-3.5 text-[#ef5b25]" />
+                            <FileCode className="h-3.5 w-3.5 text-indigo-500" />
                             {modularFiles[selectedFileIndex]?.filename || "conftest.py"}
                           </span>
                           <button
@@ -1708,7 +1990,7 @@ export default function App() {
               <div className="flex flex-col gap-5">
                 {!pytestCode ? (
                   <div className={`rounded-2xl border ${borderCol} ${bgAccent} p-12 text-center flex flex-col items-center justify-center gap-4`}>
-                    <div className="p-3 bg-[#ef5b25]/10 rounded-full text-[#ef5b25] border border-[#ef5b25]/20">
+                    <div className="p-3 bg-indigo-500/10 rounded-full text-indigo-500 border border-indigo-500/20">
                       <Terminal className="h-6 w-6" />
                     </div>
                     <div>
@@ -1724,7 +2006,7 @@ export default function App() {
                     {/* Select Execution health profile */}
                     <div className={`p-4 border ${borderCol} rounded-xl ${bgAccent} flex flex-col gap-4`}>
                       <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-mono text-orange-500 uppercase font-bold">PANE 3 • TARGET VM SIMULATOR</span>
+                        <span className="text-[10px] font-mono text-indigo-500 uppercase font-bold">PANE 3 • TARGET VM SIMULATOR</span>
                         <div className="flex items-center gap-1.5 text-[10px] font-mono text-neutral-400">
                           <Server className="h-3.5 w-3.5" />
                           Status: Active Sandbox
@@ -1733,7 +2015,7 @@ export default function App() {
 
                       <div className={`flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 ${isDarkMode ? "bg-[#0d0d10] border-neutral-800" : "bg-neutral-50 border-neutral-200"} p-3 rounded-lg border`}>
                         <div className="max-w-md text-xs leading-normal">
-                          <span className="text-[10px] font-mono font-bold text-[#ef5b25] block uppercase">Network drift simulator settings</span>
+                          <span className="text-[10px] font-mono font-bold text-indigo-550 block uppercase">Network drift simulator settings</span>
                           <p className={`${isDarkMode ? "text-neutral-400" : "text-neutral-600"} text-[11px] shrink font-light mt-0.5`}>
                             Synthesize simulated response values payload mismatches, expired tokens 401 drift, and bad socket 503 errors to see how failures report.
                           </p>
@@ -1742,7 +2024,7 @@ export default function App() {
                         <select
                           value={simulationMode}
                           onChange={(e) => setSimulationMode(e.target.value as any)}
-                          className={`py-1.5 px-3 border rounded-md text-xs focus:ring-1 focus:ring-orange-500 font-mono ${selectStyle}`}
+                          className={`py-1.5 px-3 border rounded-md text-xs focus:ring-1 focus:ring-indigo-500 font-mono ${selectStyle}`}
                         >
                           <option value="success">Normal Run (100% Passed)</option>
                           <option value="offline">Server Offline (503 Service Temp Error)</option>
@@ -1754,7 +2036,7 @@ export default function App() {
                       <button
                         onClick={handleExecuteTests}
                         disabled={isExecuting}
-                        className={`w-full py-2.5 ${isDarkMode ? "bg-neutral-900 border-neutral-800 text-white" : "bg-neutral-100 border-neutral-300 text-neutral-800"} hover:bg-[#ef5b25] hover:text-white hover:border-[#ef5b25] rounded-xl font-mono font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition`}
+                        className={`w-full py-2.5 ${isDarkMode ? "bg-neutral-900 border-neutral-800 text-white" : "bg-neutral-100 border-neutral-300 text-neutral-800"} hover:bg-indigo-600 hover:text-white hover:border-indigo-600 rounded-xl font-mono font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition`}
                       >
                         {isExecuting ? (
                           <>
@@ -1805,8 +2087,8 @@ export default function App() {
                               onClick={() => copyToClipboard(execResult.output_log, "pytestTerminal")}
                               className={`text-[9px] px-2 py-0.5 rounded font-mono font-bold ${
                                 isDarkMode 
-                                  ? "text-[#ef5b25] bg-[#1a1b1d] border-neutral-700/60 hover:text-white" 
-                                  : "text-white bg-[#ef5b25] hover:bg-[#d84e1b]"
+                                  ? "text-indigo-500 bg-[#1a1b1d] border-neutral-700/60 hover:text-white" 
+                                  : "text-white bg-indigo-600 hover:bg-indigo-700"
                               }`}
                             >
                               {copiedStates["pytestTerminal"] ? "Copied" : "Copy terminal logs"}
@@ -1849,11 +2131,11 @@ export default function App() {
 
                                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 leading-relaxed text-[11px] font-light">
                                     <div className={`${isDarkMode ? "bg-neutral-900/35 border-neutral-800" : "bg-neutral-100/50 border-neutral-200"} p-2 rounded-lg border flex flex-col`}>
-                                      <span className="font-mono font-semibold text-[9px] text-[#ef5b25] uppercase tracking-wider">PROBABLE ROOT CAUSE</span>
+                                      <span className="font-mono font-semibold text-[9px] text-indigo-500 uppercase tracking-wider">PROBABLE ROOT CAUSE</span>
                                       <p className={`mt-1 font-light leading-relaxed ${isDarkMode ? "text-neutral-300" : "text-neutral-700"}`}>{fail.probable_cause}</p>
                                     </div>
-                                    <div className="bg-[#ef5b25]/5 p-2 rounded-lg border border-[#ef5b25]/15 flex flex-col">
-                                      <span className="font-mono font-bold text-[9px] text-[#ef5b25] uppercase tracking-wider">SUGGESTED CORRECTION ACTION</span>
+                                    <div className="bg-indigo-500/5 p-2 rounded-lg border border-indigo-500/15 flex flex-col">
+                                      <span className="font-mono font-bold text-[9px] text-indigo-500 uppercase tracking-wider">SUGGESTED CORRECTION ACTION</span>
                                       <p className="mt-1 font-medium leading-relaxed">{fail.recommendations}</p>
                                     </div>
                                   </div>
@@ -1915,7 +2197,7 @@ export default function App() {
                       onClick={() => { fetchMcpTools(); fetchMcpLogs(); }}
                       className={`py-1.5 px-3 rounded-lg border ${borderCol} text-[10px] font-mono hover:bg-neutral-500/5 transition flex items-center gap-1.5 font-bold uppercase cursor-pointer`}
                     >
-                      <RefreshCw className="h-3.5 w-3.5 text-[#ef5b25]" />
+                      <RefreshCw className="h-3.5 w-3.5 text-indigo-500" />
                       Sync Registry
                     </button>
                     <a
@@ -1938,7 +2220,7 @@ export default function App() {
                     
                     <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
                       <div>
-                        <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-orange-500 flex items-center gap-2">
+                        <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-indigo-500 flex items-center gap-2">
                           <Cpu className="h-4.5 w-4.5" />
                           MCP Server Tools Dashboard
                         </h4>
@@ -1955,12 +2237,12 @@ export default function App() {
                           mcpTools.map((tool) => (
                             <div
                               key={tool.name}
-                              className={`p-3.5 rounded-xl border ${mcpSelectedTool === tool.name ? "border-[#ef5b25]/50 bg-[#ef5b25]/5" : isDarkMode ? "border-neutral-800 bg-neutral-900/10 hover:bg-neutral-900/30" : "border-neutral-200 bg-neutral-50 hover:bg-neutral-100/50"} transition flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer`}
+                              className={`p-3.5 rounded-xl border ${mcpSelectedTool === tool.name ? "border-indigo-500/50 bg-indigo-500/5" : isDarkMode ? "border-neutral-800 bg-neutral-900/10 hover:bg-neutral-900/30" : "border-neutral-200 bg-neutral-50 hover:bg-neutral-100/50"} transition flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer`}
                               onClick={() => setMcpSelectedTool(tool.name)}
                             >
                               <div className="flex-1 min-w-0 font-sans">
                                 <div className="flex items-center gap-2 font-mono">
-                                  <span className={`text-[12px] font-bold ${mcpSelectedTool === tool.name ? "text-[#ef5b25]" : isDarkMode ? "text-white" : "text-neutral-900"}`}>
+                                  <span className={`text-[12px] font-bold ${mcpSelectedTool === tool.name ? "text-indigo-500" : isDarkMode ? "text-white" : "text-neutral-900"}`}>
                                     {tool.name}
                                   </span>
                                   <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-widest ${tool.status === "active" ? "text-emerald-500 bg-emerald-500/10 border border-emerald-500/20" : "text-amber-500 bg-amber-500/10"}`}>
@@ -1977,7 +2259,7 @@ export default function App() {
                                 </div>
                               </div>
                               <div className="shrink-0 flex items-center justify-end">
-                                <ChevronRight className={`h-4.5 w-4.5 transition ${mcpSelectedTool === tool.name ? "text-[#ef5b25] translate-x-1" : "text-neutral-600"}`} />
+                                <ChevronRight className={`h-4.5 w-4.5 transition ${mcpSelectedTool === tool.name ? "text-indigo-500 translate-x-1" : "text-neutral-600"}`} />
                               </div>
                             </div>
                           ))
@@ -1990,9 +2272,9 @@ export default function App() {
                       <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm animate-fadeIn`}>
                         <div className="flex justify-between items-center border-b border-neutral-800/20 pb-2.5">
                           <div>
-                            <span className="text-[10px] font-mono text-[#ef5b25] uppercase font-bold tracking-wider">RAW TOOL WORKBENCH</span>
+                            <span className="text-[10px] font-mono text-indigo-500 uppercase font-bold tracking-wider">RAW TOOL WORKBENCH</span>
                             <h4 className={`text-xs font-bold font-mono text-neutral-300 mt-0.5`}>
-                              RPC Method Call: <span className="text-[#ef5b25] select-all">{mcpSelectedTool}</span>
+                              RPC Method Call: <span className="text-indigo-500 select-all">{mcpSelectedTool}</span>
                             </h4>
                           </div>
                           <span className="text-[9px] font-mono text-neutral-500 uppercase tracking-widest">JSON-RPC 2.0</span>
@@ -2011,13 +2293,13 @@ export default function App() {
                               value={mcpToolArgs}
                               onChange={(e) => setMcpToolArgs(e.target.value)}
                               rows={10}
-                              className={`w-full py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-700 bg-black/40 ${isDarkMode ? "bg-[#0d0d10] border-neutral-800 text-neutral-200 focus:border-orange-500" : "bg-neutral-50 border-neutral-200 text-neutral-900 focus:border-orange-500"}`}
+                              className={`w-full py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-700 bg-black/40 ${isDarkMode ? "bg-[#0d0d10] border-neutral-800 text-neutral-200 focus:border-indigo-500" : "bg-neutral-50 border-neutral-200 text-neutral-900 focus:border-indigo-500"}`}
                               placeholder="{}"
                             />
                             <button
                               onClick={handleInvokeMcpToolRaw}
                               disabled={mcpIsCallingTool}
-                              className="mt-1 bg-orange-600/10 hover:bg-orange-600/25 text-[#ef5b25] border border-orange-500/20 hover:border-orange-500/50 transition font-mono font-bold py-2 rounded-xl flex items-center justify-center gap-2 text-xs cursor-pointer"
+                              className="mt-1 bg-indigo-600/10 hover:bg-indigo-600/25 text-indigo-500 border border-indigo-500/20 hover:border-indigo-500/50 transition font-mono font-bold py-2 rounded-xl flex items-center justify-center gap-2 text-xs cursor-pointer"
                             >
                               {mcpIsCallingTool ? (
                                 <>
@@ -2039,7 +2321,7 @@ export default function App() {
                               <Terminal className="h-3.5 w-3.5" />
                               Server JSON-RPC Response JSON
                             </span>
-                            <div className={`w-full h-[264px] border rounded-xl p-3 font-mono text-[10.5px]/relaxed overflow-auto select-all max-h-72 align-top ${isDarkMode ? "bg-[#09090b] text-[#55ea46] border-neutral-800" : "bg-neutral-50 border-neutral-200 text-[#ef5b25]"}`}>
+                            <div className={`w-full h-[264px] border rounded-xl p-3 font-mono text-[10.5px]/relaxed overflow-auto select-all max-h-72 align-top ${isDarkMode ? "bg-[#09090b] text-[#55ea46] border-neutral-800" : "bg-neutral-50 border-neutral-200 text-neutral-850"}`}>
                               {mcpRawResponse ? (
                                 <pre className="whitespace-pre">{mcpRawResponse}</pre>
                               ) : (
@@ -2104,7 +2386,7 @@ export default function App() {
                             <span className="text-[9px] font-mono text-neutral-500">
                               {chat.sender === "user" ? "User" : "MCP AI QA Agent"} • {new Date(chat.timestamp || Date.now()).toLocaleTimeString()}
                             </span>
-                            <div className={`px-3 py-2 rounded-xl text-[11px] leading-relaxed ${chat.sender === "user" ? "bg-[#ef5b25]/15 text-[#ef5b25] border border-orange-500/20 font-medium font-mono" : isDarkMode ? "bg-neutral-900/60 text-neutral-100 border border-neutral-800" : "bg-white text-neutral-800 border border-neutral-200"}`}>
+                            <div className={`px-3 py-2 rounded-xl text-[11px] leading-relaxed ${chat.sender === "user" ? "bg-indigo-500/15 text-indigo-500 border border-indigo-500/20 font-medium font-mono" : isDarkMode ? "bg-neutral-900/60 text-neutral-100 border border-neutral-800" : "bg-white text-neutral-800 border border-neutral-200"}`}>
                               
                               {/* Direct user text or response */}
                               {chat.text && <p className="whitespace-pre-wrap">{chat.text}</p>}
@@ -2113,8 +2395,8 @@ export default function App() {
                               {/* Telemetry traces nested inside Agent Responses to expose exact tool-calling choices */}
                               {chat.toolCalled && (
                                 <div className="mt-2.5 p-2 bg-neutral-950/80 rounded-lg border border-neutral-800/80 text-[10px] font-mono text-neutral-300 flex flex-col gap-1.5 leading-normal">
-                                  <div className="flex items-center gap-1.5 text-orange-500 font-bold text-[9px] uppercase tracking-wider">
-                                    <Cpu className="h-3 w-3 text-orange-500 animate-pulse" />
+                                  <div className="flex items-center gap-1.5 text-indigo-500 font-bold text-[9px] uppercase tracking-wider">
+                                    <Cpu className="h-3 w-3 text-indigo-500 animate-pulse" />
                                     Agent Tool Execution Log
                                   </div>
                                   <div>
@@ -2122,7 +2404,7 @@ export default function App() {
                                     <p className="text-neutral-300 text-[10px] italic font-light mt-0.5">"{chat.thought}"</p>
                                   </div>
                                   <div>
-                                    <span className="text-neutral-500 text-[9px]">Tool Selected:</span> <strong className="text-orange-500">{chat.toolCalled}</strong>
+                                    <span className="text-neutral-500 text-[9px]">Tool Selected:</span> <strong className="text-indigo-500">{chat.toolCalled}</strong>
                                   </div>
                                   <div>
                                     <span className="text-neutral-500 text-[9px]">Resolved Args:</span>
@@ -2162,12 +2444,12 @@ export default function App() {
                           value={mcpAgentInput}
                           onChange={(e) => setMcpAgentInput(e.target.value)}
                           placeholder="Ask Agent to call 'analyze_failure'..."
-                          className={`flex-grow py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-[#ef5b25] ${selectStyle}`}
+                          className={`flex-grow py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${selectStyle}`}
                         />
                         <button
                           type="submit"
                           disabled={mcpIsAgentThinking || !mcpAgentInput.trim()}
-                          className="bg-[#ef5b25] hover:bg-orange-600 font-bold font-mono px-4 py-2 text-white rounded-xl text-xs flex items-center gap-1.5 transition uppercase cursor-pointer"
+                          className="bg-indigo-600 hover:bg-indigo-700 font-bold font-mono px-4 py-2 text-white rounded-xl text-xs flex items-center gap-1.5 transition uppercase cursor-pointer"
                         >
                           <Send className="h-3 w-3" />
                           Send
@@ -2180,7 +2462,7 @@ export default function App() {
                     <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
                       <div className="flex justify-between items-center border-b border-neutral-800/20 pb-2.5">
                         <div>
-                          <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-[#ef5b25] flex items-center gap-1.5">
+                          <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-indigo-500 flex items-center gap-1.5">
                             <Activity className="h-4 w-4" />
                             Live Invocations logs
                           </h4>
@@ -2188,7 +2470,7 @@ export default function App() {
                             Chronological history of JSON-RPC schema calls intercepted by the server.
                           </p>
                         </div>
-                        <span className="text-[9px] text-[#ef5b25] bg-[#ef5b25]/10 px-2 py-0.5 rounded font-mono font-black uppercase">Intercepting</span>
+                        <span className="text-[9px] text-indigo-500 bg-indigo-500/10 px-2 py-0.5 rounded font-mono font-black uppercase">Intercepting</span>
                       </div>
 
                       <div className="flex flex-col gap-2 max-h-56 overflow-y-auto">
@@ -2212,7 +2494,7 @@ export default function App() {
                                 <span className="text-neutral-500">Method called:</span> <strong className={isDarkMode ? "text-neutral-100" : "text-neutral-900"}>{log.toolName}</strong>
                               </div>
                               <details className="mt-1">
-                                <summary className="cursor-pointer text-[8.5px] text-[#ef5b25] font-semibold hover:underline">Show log transaction envelope</summary>
+                                <summary className="cursor-pointer text-[8.5px] text-indigo-500 font-semibold hover:underline">Show log transaction envelope</summary>
                                 <pre className="text-[8.5px] text-neutral-400 mt-1.5 bg-black/35 p-1 rounded max-h-16 overflow-y-auto select-all whitespace-pre-wrap">{JSON.stringify({ arguments: log.arguments, response: log.response }, null, 2)}</pre>
                               </details>
                             </div>
@@ -2240,7 +2522,7 @@ export default function App() {
                   <div>Timestamp: <span className={isDarkMode ? "text-neutral-300" : "text-neutral-700"}>{aiPromptMeta.timestamp}</span></div>
                 </div>
                 <details className="cursor-pointer">
-                  <summary className="text-[#ef5b25] font-semibold hover:underline">View Mapping System Directives</summary>
+                  <summary className="text-indigo-500 font-semibold hover:underline">View Mapping System Directives</summary>
                   <pre className={`mt-2 text-[9px] p-2 rounded max-h-24 overflow-y-auto border whitespace-pre-wrap ${
                     isDarkMode 
                       ? "bg-neutral-950 text-neutral-500 border-neutral-900" 
@@ -2267,6 +2549,14 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* Auth Modal overlay */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        isDarkMode={isDarkMode}
+        onAuthSuccess={(newSession) => setSession(newSession)}
+      />
     </div>
   );
 }
