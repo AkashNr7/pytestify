@@ -1,6 +1,8 @@
 {
-  "name": "Postman to Pytest Migrator",
+  "name": "Remix: Postman to Pytest Migrator",
   "description": "Migrate Postman Collection JSON requests and their JavaScript test assertions into clean, idiomatic Python pytest functions using Gemini AI.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

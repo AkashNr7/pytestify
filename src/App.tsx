@@ -116,15 +116,34 @@ export default function App() {
       
       const { data: { session: currentSession } } = await supabase.auth.getSession();
       if (active) {
-        setSession(currentSession);
         if (currentSession) {
+          setSession(currentSession);
           fetch("/api/users/sync", {
             method: "POST",
             headers: {
               "Authorization": `Bearer ${currentSession.access_token}`
             }
-          }).catch(err => console.warn("Silent profile sync err:", err));
+          })
+          .then(res => res.json())
+          .then(data => {
+            if (active && data.user) {
+              const updatedSession = {
+                ...currentSession,
+                user: {
+                  ...currentSession.user,
+                  role: data.user.role,
+                  user_metadata: {
+                    ...currentSession.user.user_metadata,
+                    role: data.user.role
+                  }
+                }
+              };
+              setSession(updatedSession);
+            }
+          })
+          .catch(err => console.warn("Silent profile sync err:", err));
         } else {
+          setSession(null);
           setIsAuthModalOpen(true);
         }
       }
@@ -132,7 +151,35 @@ export default function App() {
       // Keep session listener in sync
       const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
         if (active) {
-          setSession(newSession);
+          if (newSession) {
+            setSession(newSession);
+            fetch("/api/users/sync", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${newSession.access_token}`
+              }
+            })
+            .then(res => res.json())
+            .then(data => {
+              if (active && data.user) {
+                const refreshedSession = {
+                  ...newSession,
+                  user: {
+                    ...newSession.user,
+                    role: data.user.role,
+                    user_metadata: {
+                      ...newSession.user.user_metadata,
+                      role: data.user.role
+                    }
+                  }
+                };
+                setSession(refreshedSession);
+              }
+            })
+            .catch(err => console.warn("Listener state sync err:", err));
+          } else {
+            setSession(null);
+          }
         }
       });
 
@@ -1684,18 +1731,20 @@ export default function App() {
                   <Cpu className="h-4 w-4 text-emerald-500 animate-pulse" />
                   MCP Hub
                 </button>
-                <button
-                  id="tab-btn-directory-audit"
-                  onClick={() => setActiveTab("audit")}
-                  className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                    activeTab === "audit"
-                      ? "border-amber-500 text-amber-500 font-bold"
-                      : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
-                  }`}
-                >
-                  <ShieldCheck className="h-4 w-4 text-amber-500 animate-pulse" />
-                  Directory & Logs
-                </button>
+                {session?.user?.role === "Admin" && (
+                  <button
+                    id="tab-btn-directory-audit"
+                    onClick={() => setActiveTab("audit")}
+                    className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
+                      activeTab === "audit"
+                        ? "border-amber-500 text-amber-500 font-bold"
+                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
+                    }`}
+                  >
+                    <ShieldCheck className="h-4 w-4 text-amber-500 animate-pulse" />
+                    Directory & Logs
+                  </button>
+                )}
 
               </div>
             </div>

@@ -11,12 +11,138 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
   const [loading, setLoading] = useState<boolean>(false);
   const [errorText, setErrorText] = useState<string>("");
   const [successText, setSuccessText] = useState<string>("");
+  const [dateFilter, setDateFilter] = useState<"all" | "week" | "today">("week"); // Default to 'week' (Past 7 days)
+
+  // Date-based Filtering Helpers
+  const filterByDateRange = (itemDateStr: string) => {
+    if (dateFilter === "all") return true;
+    const itemTime = new Date(itemDateStr).getTime();
+    if (isNaN(itemTime)) return true;
+    const nowTime = new Date().getTime();
+    const msDiff = nowTime - itemTime;
+    if (dateFilter === "today") {
+      return msDiff <= 24 * 60 * 60 * 1000;
+    }
+    if (dateFilter === "week") {
+      return msDiff <= 7 * 24 * 60 * 60 * 1000;
+    }
+    return true;
+  };
+
+  // Export CSV Table Helper
+  const handleExportCSV = (type: "audit" | "login" | "mcp") => {
+    let headers: string[] = [];
+    let rows: string[][] = [];
+    let filename = "";
+
+    if (type === "audit") {
+      headers = ["Timestamp", "Compliance Action", "Operator Name", "Operator Email", "Scope Target", "Details", "Status", "IP Address"];
+      rows = filteredAuditLogs.map(log => {
+        const timestamp = log.created_at || log.timestamp;
+        const operatorName = log.users?.fullName || log.user_fullname || "Operator System";
+        const operatorEmail = log.users?.email || log.user_email || "internal@company.com";
+        const targetTable = log.target_table || log.resource_type || "system";
+        const details = log.details || "";
+        const status = log.status || "Success";
+        const ip = log.ip_address || "";
+        return [
+          new Date(timestamp).toISOString(),
+          log.action || "API_CALL",
+          operatorName,
+          operatorEmail,
+          targetTable,
+          details,
+          status,
+          ip
+        ];
+      });
+      filename = `security_audit_logs_export.csv`;
+    } else if (type === "login") {
+      headers = ["Attempt Timestamp", "Authentication Entity (Email)", "Terminal Node IP", "Device Agent", "Outcome Status", "Trace Details"];
+      rows = filteredLoginHistory.map(lh => {
+        const email = lh.user_email || lh.email || lh.users?.email || "guest@company.com";
+        const device = lh.user_agent || lh.device_information || "Corporate Workgroup Client";
+        const status = lh.status || lh.login_status || "Success";
+        const details = lh.details || "Corporate Security Handshake Complete";
+        return [
+          new Date(lh.login_time).toISOString(),
+          email,
+          lh.ip_address || "0.0.0.0",
+          device,
+          status,
+          details
+        ];
+      });
+      filename = `ldap_login_history_export.csv`;
+    } else if (type === "mcp") {
+      headers = ["Timestamp", "MCP Tool Name", "Invoker Employee", "Invoker Email", "Status", "Elapsed Weight (Seconds)", "Arguments", "Response Summary"];
+      rows = filteredMcpLogs.map(ml => {
+        const timestamp = ml.created_at || ml.timestamp;
+        const fullname = ml.users?.fullName || ml.user_fullname || "System Administrator";
+        const email = ml.users?.email || ml.user_email || "mcp_runner@company.com";
+        const status = ml.status || ml.execution_status || "Success";
+        const elapsed = String(ml.elapsed_seconds ?? ml.execution_time ?? 0.5);
+        const args = typeof ml.arguments === "object" ? JSON.stringify(ml.arguments) : String(ml.arguments || "");
+        const response = typeof ml.response === "object" ? JSON.stringify(ml.response) : String(ml.response || "");
+        return [
+          new Date(timestamp).toISOString(),
+          ml.tool_name || "",
+          fullname,
+          email,
+          status,
+          elapsed,
+          args,
+          response
+        ];
+      });
+      filename = `mcp_activity_logs_export.csv`;
+    }
+
+    const csvContent = [
+      headers.join(","),
+      ...rows.map(row => 
+        row.map(value => {
+          const stringified = String(value ?? "");
+          if (stringified.includes(",") || stringified.includes('"') || stringified.includes("\n") || stringified.includes("\r")) {
+            return `"${stringified.replace(/"/g, '""')}"`;
+          }
+          return stringified;
+        }).join(",")
+      )
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", filename);
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   // DB Data stores
   const [users, setUsers] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [loginHistory, setLoginHistory] = useState<any[]>([]);
   const [mcpLogs, setMcpLogs] = useState<any[]>([]);
+
+  const filteredAuditLogs = auditLogs.filter(log => {
+    const timestamp = log.created_at || log.timestamp;
+    return filterByDateRange(timestamp);
+  });
+
+  const filteredLoginHistory = loginHistory.filter(lh => {
+    return filterByDateRange(lh.login_time);
+  });
+
+  const filteredMcpLogs = mcpLogs.filter(ml => {
+    const timestamp = ml.created_at || ml.timestamp;
+    return filterByDateRange(timestamp);
+  });
+
   const [stats, setStats] = useState<any>({
     totalUsers: 0,
     activeSubscribers: 0,
@@ -406,6 +532,53 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
         </button>
       </div>
 
+      {/* Filters and Utilities Bar */}
+      {(activeSubTab === "audit" || activeSubTab === "login" || activeSubTab === "mcp") && (
+        <div className={`p-3 rounded-xl border ${borderCol} ${bgAccent} flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono`}>
+          <div className="flex items-center gap-3">
+            <span className="text-neutral-400 font-bold">Trace Date Range:</span>
+            <div className="flex rounded-lg bg-neutral-950/40 p-0.5 border border-neutral-800">
+              <button
+                onClick={() => setDateFilter("week")}
+                id="filter-btn-past-week"
+                className={`px-3 py-1 rounded text-[10.5px] transition cursor-pointer ${
+                  dateFilter === "week" ? "bg-emerald-500/10 text-emerald-400 font-bold border border-emerald-500/20" : "text-neutral-400 border border-transparent hover:text-neutral-200"
+                }`}
+              >
+                Past Week (7 Days)
+              </button>
+              <button
+                onClick={() => setDateFilter("today")}
+                id="filter-btn-today"
+                className={`px-3 py-1 rounded text-[10.5px] transition cursor-pointer ${
+                  dateFilter === "today" ? "bg-emerald-500/10 text-emerald-400 font-bold border border-emerald-500/20" : "text-neutral-400 border border-transparent hover:text-neutral-200"
+                }`}
+              >
+                Today Only
+              </button>
+              <button
+                onClick={() => setDateFilter("all")}
+                id="filter-btn-all-time"
+                className={`px-3 py-1 rounded text-[10.5px] transition cursor-pointer ${
+                  dateFilter === "all" ? "bg-neutral-800 text-neutral-200 border border-neutral-700/50" : "text-neutral-400 border border-transparent hover:text-neutral-200"
+                }`}
+              >
+                All Historical
+              </button>
+            </div>
+          </div>
+
+          <button
+            onClick={() => handleExportCSV(activeSubTab)}
+            id={`btn-csv-export-${activeSubTab}`}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#beebd8]/10 hover:bg-[#beebd8]/25 text-[#beebd8] rounded-lg border border-[#beebd8]/20 transition cursor-pointer font-bold font-mono tracking-wide shadow-xs shrink-0 self-stretch sm:self-auto justify-center"
+          >
+            <FileSpreadsheet className="h-4 w-4 text-emerald-400 animate-pulse" />
+            <span>Export Table (.CSV)</span>
+          </button>
+        </div>
+      )}
+
       {/* FEEDBACK FEED */}
       {errorText && errorText !== "CLEARANCE_ERR" && (
         <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-xs flex gap-2">
@@ -518,6 +691,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
                               onChange={e => setAddRole(e.target.value)}
                               className="w-full text-xs px-2 py-1.5 bg-[#101113] border border-neutral-850 text-white rounded focus:outline-none focus:border-indigo-500 font-mono"
                             >
+                              <option value="Staff">Staff</option>
                               <option value="Developer">Developer</option>
                               <option value="QA Engineer">QA Engineer</option>
                               <option value="Manager">Manager</option>
@@ -755,12 +929,12 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-800/60 leading-relaxed font-mono">
-                    {auditLogs.length === 0 ? (
+                    {filteredAuditLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="p-8 text-center text-neutral-500">No organizational administrative compliance records logged.</td>
+                        <td colSpan={6} className="p-8 text-center text-neutral-500">No organizational administrative compliance records logged in chosen date range.</td>
                       </tr>
                     ) : (
-                      auditLogs.map((log) => {
+                      filteredAuditLogs.map((log) => {
                         const timestamp = log.created_at || log.timestamp;
                         const operatorName = log.users?.fullName || log.user_fullname || "Operator System";
                         const operatorEmail = log.users?.email || log.user_email || "internal@company.com";
@@ -817,12 +991,12 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-800/60 leading-relaxed font-mono">
-                    {loginHistory.length === 0 ? (
+                    {filteredLoginHistory.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="p-8 text-center text-neutral-500">No LDAP login connection metadata tracks returned.</td>
+                        <td colSpan={5} className="p-8 text-center text-neutral-500">No LDAP login connection metadata tracks returned in chosen date range.</td>
                       </tr>
                     ) : (
-                      loginHistory.map((lh) => {
+                      filteredLoginHistory.map((lh) => {
                         const email = lh.user_email || lh.email || lh.users?.email || "guest@company.com";
                         const device = lh.user_agent || lh.device_information || "Corporate Workgroup Client";
                         const status = lh.status || lh.login_status || "Success";
@@ -870,12 +1044,12 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-800/60 leading-relaxed font-mono">
-                    {mcpLogs.length === 0 ? (
+                    {filteredMcpLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="p-8 text-center text-neutral-500 animate-pulse">Waiting for developer AI agent workspace calls...</td>
+                        <td colSpan={6} className="p-8 text-center text-neutral-500">No active server invocations logged in chosen date range.</td>
                       </tr>
                     ) : (
-                      mcpLogs.map((ml) => {
+                      filteredMcpLogs.map((ml) => {
                         const timestamp = ml.created_at || ml.timestamp;
                         const fullname = ml.users?.fullName || ml.user_fullname || "System Administrator";
                         const email = ml.users?.email || ml.user_email || "mcp_runner@company.com";

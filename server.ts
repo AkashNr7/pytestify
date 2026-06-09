@@ -29,8 +29,25 @@ const fallbackUsersDb: any[] = [
     role: "Admin",
     account_status: "Active",
     created_at: new Date().toISOString()
+  },
+  {
+    id: "00000000-0000-0000-0000-000000000100",
+    username: "staff",
+    password: "staff",
+    email: "staff@organization.com",
+    employee_id: "EMP-STAFF-10",
+    full_name: "STAFF SOFTWARE DISPATCHER",
+    department: "Engineering Operations",
+    designation: "Staff Software Engineer",
+    role: "Staff",
+    account_status: "Active",
+    created_at: new Date().toISOString()
   }
 ];
+
+const fallbackLoginHistory: any[] = [];
+const fallbackAuditLogs: any[] = [];
+const fallbackMcpHistory: any[] = [];
 
 // Lazy initializer for Gemini Client
 let aiClient: GoogleGenAI | null = null;
@@ -541,6 +558,21 @@ async function getAuthenticatedUser(req: express.Request) {
 // Logging Helpers
 async function logAudit(client: any, userId: string | null, action: string, resourceType: string | null, resourceId: string | null, status: string, details: string, req: express.Request) {
   const ip = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
+  const timestamp = new Date().toISOString();
+
+  // Always store fallback audit log
+  fallbackAuditLogs.push({
+    id: "audit-" + Math.floor(100000 + Math.random() * 900000),
+    user_id: userId,
+    action,
+    resource_type: resourceType,
+    resource_id: resourceId,
+    status,
+    details,
+    ip_address: String(ip),
+    timestamp
+  });
+
   try {
     await client.from("audit_logs").insert([{
       user_id: userId,
@@ -550,7 +582,7 @@ async function logAudit(client: any, userId: string | null, action: string, reso
       status,
       details,
       ip_address: String(ip),
-      timestamp: new Date().toISOString()
+      timestamp
     }]);
   } catch (err) {
     console.warn("Failed to write audit_log payload (tables may not exist):", err);
@@ -560,8 +592,18 @@ async function logAudit(client: any, userId: string | null, action: string, reso
 async function logLoginHistory(client: any, userId: string, action: string, req: express.Request, loginStatus: string, device_info?: string) {
   const ip = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
   const agent = req.headers["user-agent"] || "Unknown Device";
+  const timestamp = new Date().toISOString();
+
   try {
     if (action === "Logout") {
+      // In-memory logout update
+      const latestInMem = fallbackLoginHistory
+        .filter(l => l.user_id === userId)
+        .sort((a, b) => new Date(b.login_time).getTime() - new Date(a.login_time).getTime())[0];
+      if (latestInMem) {
+        latestInMem.logout_time = timestamp;
+      }
+
       const { data: latest } = await client
         .from("login_history")
         .select("id")
@@ -572,13 +614,23 @@ async function logLoginHistory(client: any, userId: string, action: string, req:
       if (latest && latest.length > 0) {
         await client
           .from("login_history")
-          .update({ logout_time: new Date().toISOString() })
+          .update({ logout_time: timestamp })
           .eq("id", latest[0].id);
       }
     } else {
+      // Always store in fallback login log
+      fallbackLoginHistory.push({
+        id: "log-" + Math.floor(100000 + Math.random() * 900000),
+        user_id: userId,
+        login_time: timestamp,
+        ip_address: String(ip),
+        device_information: device_info || String(agent),
+        login_status: loginStatus
+      });
+
       await client.from("login_history").insert([{
         user_id: userId,
-        login_time: new Date().toISOString(),
+        login_time: timestamp,
         ip_address: String(ip),
         device_information: device_info || String(agent),
         login_status: loginStatus
@@ -590,6 +642,20 @@ async function logLoginHistory(client: any, userId: string, action: string, req:
 }
 
 async function logMcpActivity(client: any, userId: string | null, toolName: string, requestPayload: any, responseSummary: any, executionStatus: string, executionTime: number) {
+  const timestamp = new Date().toISOString();
+  
+  // Try logging to local memory fallback first
+  fallbackMcpHistory.push({
+    id: "mcp-" + Math.floor(100000 + Math.random() * 900000),
+    user_id: userId,
+    tool_name: toolName,
+    request_payload: typeof requestPayload === "object" ? JSON.stringify(requestPayload) : String(requestPayload),
+    response_summary: typeof responseSummary === "object" ? JSON.stringify(responseSummary) : String(responseSummary),
+    execution_status: executionStatus,
+    execution_time: executionTime,
+    timestamp
+  });
+
   try {
     await client.from("mcp_activity").insert([{
       user_id: userId,
@@ -598,7 +664,7 @@ async function logMcpActivity(client: any, userId: string | null, toolName: stri
       response_summary: typeof responseSummary === "object" ? JSON.stringify(responseSummary) : String(responseSummary),
       execution_status: executionStatus,
       execution_time: executionTime,
-      timestamp: new Date().toISOString()
+      timestamp
     }]);
   } catch (err) {
     console.warn("Failed to write mcp_activity payload (tables may not exist):", err);
@@ -692,11 +758,12 @@ app.post("/api/auth/register-simple", async (req, res) => {
 
 app.post("/api/auth/login-simple", async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password, loginRole } = req.body;
     if (!username || !password) {
       return res.status(400).json({ error: "Username and password are required." });
     }
 
+    const requestedRole = loginRole || "staff";
     let matchedUser: any = null;
 
     // 1. Try querying Supabase
@@ -735,7 +802,18 @@ app.post("/api/auth/login-simple", async (req, res) => {
       return res.status(444).json({ error: "Teammate account not found. Please register standard profile first." });
     }
 
-    if (matchedUser.account_status === "Disabled") {
+    // Role-based Access Control Enforcements on Login
+    if (requestedRole === "admin") {
+      if (matchedUser.role !== "Admin") {
+        return res.status(403).json({ error: "Access Denied: This account is not configured with an 'Admin' role mapping. Please log in via the Staff Portal." });
+      }
+    } else {
+      // If logging in via Staff Portal to enforce typical user, make sure Admin isn't totally blocked,
+      // but ideally staff role, or standard developer/worker roles.
+      // We will allow anyone to log in via Staff, but we can recommend them to log in via Admin if they of Admin role.
+    }
+
+    if (matchedUser.account_status === "Disabled" || matchedUser.account_status === "Locked") {
       return res.status(403).json({ error: "This teammate access has been Locked/Disabled." });
     }
 
@@ -746,8 +824,10 @@ app.post("/api/auth/login-simple", async (req, res) => {
       user: {
         id: matchedUser.id,
         email: matchedUser.email,
+        role: matchedUser.role,
         user_metadata: {
-          full_name: matchedUser.full_name || matchedUser.username
+          full_name: matchedUser.full_name || matchedUser.username,
+          role: matchedUser.role
         }
       }
     };
@@ -756,7 +836,7 @@ app.post("/api/auth/login-simple", async (req, res) => {
     try {
       const client = getSupabaseAdminClient();
       await logLoginHistory(client, matchedUser.id, "Login Success", req, "Success");
-      await logAudit(client, matchedUser.id, "Login Success", "users", matchedUser.id, "Success", `User ${matchedUser.username} logged in securely via simple portal.`, req);
+      await logAudit(client, matchedUser.id, "Login Success", "users", matchedUser.id, "Success", `User ${matchedUser.username} logged in securely as ${matchedUser.role} via simple portal.`, req);
     } catch (logErr) {}
 
     return res.json({ status: "success", session });
@@ -1669,27 +1749,46 @@ app.get("/api/admin/audit-logs", async (req, res) => {
       return res.status(403).json({ error: "Access Denied: You do not have permissions to access central company audit logs." });
     }
 
-    let query = client
-      .from("audit_logs")
-      .select(`*`);
-
-    // Execute query and fetch profiles subsequently to be 100% resilient
-    const { data: logs, error } = await query.order("timestamp", { ascending: false });
-    if (error) {
-       if (error.message?.includes("relation") && error.message?.includes("does not exist")) {
-         return res.json({ logs: [] });
-       }
-       throw error;
+    let databaseLogs: any[] = [];
+    try {
+      const { data, error } = await client
+        .from("audit_logs")
+        .select("*")
+        .order("timestamp", { ascending: false });
+      if (data && !error) {
+        databaseLogs = data;
+      }
+    } catch (dbErr: any) {
+      console.warn("Audit logs DB check warn:", dbErr.message);
     }
 
-    // Try fetching associate profiles inline in memory to avoid nested link breaks on incomplete relational tables
-    const { data: profiles } = await client.from("users").select("*");
+    // Merge database logs with local fallbackAuditLogs
+    const allLogsMap = new Map();
+    fallbackAuditLogs.forEach(l => allLogsMap.set(l.timestamp + "-" + l.user_id + "-" + l.action, l));
+    databaseLogs.forEach(l => allLogsMap.set(l.timestamp + "-" + l.user_id + "-" + l.action, l));
+    const mergedLogs = Array.from(allLogsMap.values()).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    // Fetch associate profiles inline
+    let profiles: any[] = [];
+    try {
+      const { data } = await client.from("users").select("*");
+      if (data) {
+        profiles = data;
+      }
+    } catch (e) {}
+
     const profilesMap = (profiles || []).reduce((acc: any, curr: any) => {
       acc[curr.id] = curr;
       return acc;
     }, {});
 
-    const processedLogs = (logs || []).map((l: any) => {
+    fallbackUsersDb.forEach(u => {
+      if (!profilesMap[u.id]) {
+        profilesMap[u.id] = u;
+      }
+    });
+
+    const processedLogs = mergedLogs.map((l: any) => {
       const profile = profilesMap[l.user_id] || {};
       return {
         ...l,
@@ -1714,23 +1813,45 @@ app.get("/api/admin/login-history", async (req, res) => {
       return res.status(403).json({ error: "Access Denied" });
     }
 
-    const { data: logs, error } = await client
-      .from("login_history")
-      .select("*")
-      .order("login_time", { ascending: false });
-
-    if (error) {
-       if (error.message?.includes("relation") && error.message?.includes("does not exist")) return res.json({ logs: [] });
-       throw error;
+    let databaseLogs: any[] = [];
+    try {
+      const { data, error } = await client
+        .from("login_history")
+        .select("*")
+        .order("login_time", { ascending: false });
+      if (data && !error) {
+        databaseLogs = data;
+      }
+    } catch (dbErr: any) {
+      console.warn("Login history DB check warn:", dbErr.message);
     }
 
-    const { data: profiles } = await client.from("users").select("*");
+    // Merge database logs with local fallbackLoginHistory
+    const allHistoryMap = new Map();
+    fallbackLoginHistory.forEach(l => allHistoryMap.set(l.login_time + "-" + l.user_id, l));
+    databaseLogs.forEach(l => allHistoryMap.set(l.login_time + "-" + l.user_id, l));
+    const mergedHistory = Array.from(allHistoryMap.values()).sort((a, b) => new Date(b.login_time).getTime() - new Date(a.login_time).getTime());
+
+    let profiles: any[] = [];
+    try {
+      const { data } = await client.from("users").select("*");
+      if (data) {
+        profiles = data;
+      }
+    } catch (e) {}
+
     const profilesMap = (profiles || []).reduce((acc: any, curr: any) => {
       acc[curr.id] = curr;
       return acc;
     }, {});
 
-    const processed = (logs || []).map((l: any) => {
+    fallbackUsersDb.forEach(u => {
+      if (!profilesMap[u.id]) {
+        profilesMap[u.id] = u;
+      }
+    });
+
+    const processed = mergedHistory.map((l: any) => {
       const p = profilesMap[l.user_id] || {};
       return {
         ...l,
@@ -1754,27 +1875,58 @@ app.get("/api/admin/mcp-activity", async (req, res) => {
       return res.status(403).json({ error: "Access Denied" });
     }
 
-    const { data: logs, error } = await client
-      .from("mcp_activity")
-      .select("*")
-      .order("timestamp", { ascending: false });
-
-    if (error) {
-       if (error.message?.includes("relation") && error.message?.includes("does not exist")) return res.json({ logs: [] });
-       throw error;
+    let databaseLogs: any[] = [];
+    try {
+      const { data, error } = await client
+        .from("mcp_activity")
+        .select("*")
+        .order("timestamp", { ascending: false });
+      if (data && !error) {
+        databaseLogs = data;
+      } else if (error) {
+        console.warn("MCP activity DB check warn:", error.message);
+      }
+    } catch (dbErr: any) {
+      console.warn("MCP activity DB check catch warn:", dbErr.message);
     }
 
-    const { data: profiles } = await client.from("users").select("*");
+    // Merge database logs with local fallbackMcpHistory
+    const allMcpMap = new Map();
+    fallbackMcpHistory.forEach(l => {
+      const payloadKey = (l.request_payload ? JSON.stringify(l.request_payload).substring(0, 50) : "");
+      allMcpMap.set(l.timestamp + "-" + (l.user_id || "system") + "-" + l.tool_name + "-" + payloadKey, l);
+    });
+    databaseLogs.forEach(l => {
+      const payloadKey = (l.request_payload ? JSON.stringify(l.request_payload).substring(0, 50) : "");
+      allMcpMap.set(l.timestamp + "-" + (l.user_id || "system") + "-" + l.tool_name + "-" + payloadKey, l);
+    });
+    const mergedMcp = Array.from(allMcpMap.values()).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    // Fetch associate profiles inline
+    let profiles: any[] = [];
+    try {
+      const { data } = await client.from("users").select("*");
+      if (data) {
+        profiles = data;
+      }
+    } catch (e) {}
+
     const profilesMap = (profiles || []).reduce((acc: any, curr: any) => {
       acc[curr.id] = curr;
       return acc;
     }, {});
 
-    const processed = (logs || []).map((l: any) => {
+    fallbackUsersDb.forEach(u => {
+      if (!profilesMap[u.id]) {
+        profilesMap[u.id] = u;
+      }
+    });
+
+    const processed = mergedMcp.map((l: any) => {
       const p = profilesMap[l.user_id] || {};
       return {
         ...l,
-        user_email: p.email || "mcp_runner@company.com",
+        user_email: p.email || "mcp_runner@organization.com",
         user_fullname: p.full_name || "MCP Automation Subsystem",
         user_department: p.department || ""
       };
