@@ -248,11 +248,7 @@ export default function AuthModal({ isOpen, onClose, isDarkMode, onAuthSuccess }
                     className={`w-full text-xs px-2 py-1.5 border rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono ${inputStyle}`}
                   >
                     <option value="Staff">Staff</option>
-                    <option value="Developer">Developer</option>
-                    <option value="QA Engineer">QA Engineer</option>
-                    <option value="Manager">Manager</option>
                     <option value="Admin">Admin</option>
-                    <option value="Viewer">Viewer</option>
                   </select>
                 </div>
               </div>

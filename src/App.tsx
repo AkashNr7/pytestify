@@ -3,7 +3,16 @@ import AuthModal from "./components/AuthModal";
 import MyProjectsDashboard from "./components/MyProjectsDashboard";
 import AdminPortal from "./components/AdminPortal";
 import ChangePasswordModal from "./components/ChangePasswordModal";
+import { 
+  DashboardPanel, 
+  CollectionsPanel, 
+  PytestConsolidatedPanel, 
+  PytestModularPanel, 
+  VMRunnerPanel, 
+  SettingsPanel 
+} from "./components/WorkspaceTabPanels";
 import { getSupabaseClient } from "./supabaseClient";
+import { motion, AnimatePresence } from "motion/react";
 import {
   UploadCloud,
   Key,
@@ -21,6 +30,7 @@ import {
   Search,
   BookOpen,
   ChevronRight,
+  ChevronLeft,
   Code,
   FileCode,
   Info,
@@ -40,7 +50,17 @@ import {
   Zap,
   CheckCircle2,
   HelpCircle,
-  LogIn
+  LogIn,
+  LogOut,
+  LayoutDashboard,
+  User,
+  Users,
+  History,
+  FileSpreadsheet,
+  Lock,
+  Menu,
+  ShieldAlert,
+  HelpCircle as QuestionIcon
 } from "lucide-react";
 
 interface HeaderItem {
@@ -107,6 +127,26 @@ export default function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState<boolean>(false);
   const [activeCloudProjectId, setActiveCloudProjectId] = useState<string | null>(null);
+
+  // --- MULTI-PAGE NAVIGATION STATES ---
+  const [currentPage, setCurrentPage] = useState<
+    | "dashboard"
+    | "projects"
+    | "audit_center"
+    | "login_history"
+    | "user_management"
+    | "profile"
+    | "settings"
+  >("dashboard");
+
+  const [projectTab, setProjectTab] = useState<"collection" | "pytest" | "execution" | "ai" | "downloads">("collection");
+  const [sidebarExpanded, setSidebarExpanded] = useState<boolean>(true);
+
+  // --- STATE FOR STRUCTURED AI DIAGNOSTICS & EXPLANATIONS ---
+  const [aiDiagnosticResult, setAiDiagnosticResult] = useState<string>("");
+  const [aiDiagnosticIsLoading, setAiDiagnosticIsLoading] = useState<boolean>(false);
+  const [aiExplanationResult, setAiExplanationResult] = useState<string>("");
+  const [aiExplanationIsLoading, setAiExplanationIsLoading] = useState<boolean>(false);
 
   useEffect(() => {
     let active = true;
@@ -289,6 +329,85 @@ export default function App() {
     }
   };
 
+  const createNewProjectWithData = async (name: string, desc: string, items: any[]) => {
+    if (!session) return;
+    try {
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({
+          projectName: name,
+          collectionName: desc || "Uploaded Collection",
+          collectionItems: items,
+          library,
+          baseUrlEnv,
+          injectBaseUrlFixture,
+          addComments
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.project?.id) {
+        setActiveCloudProjectId(data.project.id);
+        setCollectionName(data.project.project_name);
+        setCollectionDescription(data.project.collection_name || "");
+        setCollectionItems(data.project.collection_items || []);
+        resetEngineState();
+      }
+    } catch (err: any) {
+      console.error("Auto create failed:", err);
+    }
+  };
+
+  // --- AUTOMATED WORKSPACE CONTEXT INITIALIZER ---
+  useEffect(() => {
+    let active = true;
+    if (session?.access_token) {
+      fetch("/api/projects", {
+        headers: {
+          "Authorization": `Bearer ${session.access_token}`
+        }
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (!active) return;
+        if (data.projects && data.projects.length > 0) {
+          // Auto-select the first project if no active project is already set
+          if (!activeCloudProjectId) {
+            handleSelectProject(data.projects[0].id);
+          }
+        } else if (!data.needSchema) {
+          // Auto-create a default project so they have an out-of-the-box working workspace!
+          fetch("/api/projects", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${session.access_token}`
+            },
+            body: JSON.stringify({
+              projectName: "Default Workspace",
+              collectionName: "Sample API collection",
+              collectionItems: []
+            })
+          })
+          .then(res => res.json())
+          .then(createData => {
+            if (active && createData.project?.id) {
+              handleSelectProject(createData.project.id);
+            }
+          })
+          .catch(err => console.warn("Auto-create default project failed:", err));
+        }
+      })
+      .catch(err => console.warn("Failed to auto-load projects on startup:", err));
+    }
+    return () => {
+      active = false;
+    };
+  }, [session]);
+
   const [collectionSource, setCollectionSource] = useState<"upload" | "postman" | "sample" | "settings">("upload");
   const [collectionName, setCollectionName] = useState<string>("");
   const [collectionDescription, setCollectionDescription] = useState<string>("");
@@ -343,6 +462,43 @@ export default function App() {
 
   // UI Navigation / Interaction states
   const [activeTab, setActiveTab] = useState<"consolidated" | "modular" | "run" | "mcp" | "audit">("consolidated");
+
+  // --- MULTI-TAB IDE WORKSPACE STATES ---
+  const [openTabs, setOpenTabs] = useState<string[]>(["dashboard", "collections", "pytest_consolidated", "runner"]);
+  const [activeTabId, setActiveTabId] = useState<string>("dashboard");
+  const [isRightSidebarOpen, setIsRightSidebarOpen] = useState<boolean>(true);
+  const [rightSidebarTab, setRightSidebarTab] = useState<"agent" | "diagnostics" | "activity">("agent");
+
+  // Bidirectional Synchronization between legacy tabs state and new Multi-Tab IDE system
+  useEffect(() => {
+    let targetTab = "";
+    if (activeTab === "consolidated") targetTab = "pytest_consolidated";
+    else if (activeTab === "modular") targetTab = "pytest_modular";
+    else if (activeTab === "run") targetTab = "runner";
+    else if (activeTab === "mcp") targetTab = "mcp_hub";
+    else if (activeTab === "audit") targetTab = "audit_logs";
+
+    if (targetTab) {
+      if (!openTabs.includes(targetTab)) {
+        setOpenTabs(prev => [...prev, targetTab]);
+      }
+      setActiveTabId(targetTab);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTabId === "pytest_consolidated" && activeTab !== "consolidated") {
+      setActiveTab("consolidated");
+    } else if (activeTabId === "pytest_modular" && activeTab !== "modular") {
+      setActiveTab("modular");
+    } else if (activeTabId === "runner" && activeTab !== "run") {
+      setActiveTab("run");
+    } else if (activeTabId === "mcp_hub" && activeTab !== "mcp") {
+      setActiveTab("mcp");
+    } else if (activeTabId === "audit_logs" && activeTab !== "audit") {
+      setActiveTab("audit");
+    }
+  }, [activeTabId]);
 
   // MCP Related States
   const [mcpTools, setMcpTools] = useState<any[]>([]);
@@ -601,6 +757,9 @@ export default function App() {
     setCollectionItems(sample.items || []);
     setCollectionSource("sample");
     resetEngineState();
+    if (!activeCloudProjectId) {
+      createNewProjectWithData(sample.name, sample.description || "Sample API collection", sample.items || []);
+    }
   };
 
   const resetEngineState = () => {
@@ -707,6 +866,9 @@ export default function App() {
       setCollectionItems(list);
       setErrorMessage("");
       resetEngineState();
+      if (!activeCloudProjectId) {
+        createNewProjectWithData(name, desc || "Uploaded Collection", list);
+      }
     } catch (e: any) {
       setErrorMessage(`Failed to parse file as valid JSON: ${e.message}`);
     }
@@ -814,6 +976,9 @@ export default function App() {
       setCollectionDescription(data.description || "Directly loaded from Postman Cloud Account.");
       setCollectionItems(data.items || []);
       resetEngineState();
+      if (!activeCloudProjectId) {
+        createNewProjectWithData(data.name, data.description || "Postman Cloud Collection", data.items || []);
+      }
     } catch (err: any) {
       setErrorMessage(`Collection Load Error: ${err.message}`);
     } finally {
@@ -1058,7 +1223,7 @@ export default function App() {
           <div className="absolute -top-16 -right-16 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl"></div>
           
           <div className="p-4 bg-indigo-600/10 border border-indigo-500/20 rounded-2xl mb-5 flex items-center justify-center text-indigo-400">
-            <Zap className="h-10 w-10 animate-pulse text-indigo-500 fill-indigo-500/10" />
+            <Zap className="h-10 w-10 animate-pulse text-indigo-505 fill-indigo-500/10" />
           </div>
 
           <span className="px-2.5 py-1 text-[9px] font-mono tracking-widest text-[#beebd8] bg-[#0b241d]/80 border border-indigo-500/20 rounded-md font-bold uppercase mb-4">
@@ -1084,7 +1249,7 @@ export default function App() {
             </button>
           </div>
 
-          <div className="text-[9px] font-mono text-neutral-500 mt-2">
+          <div className="text-[9px] font-mono text-neutral-505 mt-2">
             PORT : 3000 | COMPLIANCE AGENT ACTIVE
           </div>
         </div>
@@ -1099,1630 +1264,1113 @@ export default function App() {
     );
   }
 
+  const userRole = session?.user?.user_metadata?.role || session?.user?.role || "Staff";
+  const isAdmin = userRole === "Admin";
+
+  const handleRunFailureDiagnostic = async () => {
+    setAiDiagnosticIsLoading(true);
+    setAiDiagnosticResult("");
+    try {
+      const errorDetails = execResult?.failures?.map((f: any) => `${f.test_name}: ${f.error_message}`).join("\n") || "No failures found.";
+      const headers: any = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+      const res = await fetch("/api/mcp/agent-chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          prompt: `Provide a detailed AI Failure Diagnosis and Remediation suggestion for the following test errors:\n\n${errorDetails}\n\nStrictly address what caused the error and supply a corrected python snippet or config fix.`,
+          customApiKey,
+          contextState: { errorDetails }
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiDiagnosticResult(data.direct_response || data.finalResponse || data.response || "No diagnostic results returned.");
+      } else {
+        const text = await res.text();
+        setAiDiagnosticResult(`Error during diagnostics check: ${text}`);
+      }
+    } catch (err: any) {
+      setAiDiagnosticResult(`Failed to execute diagnostics check: ${err.message}`);
+    } finally {
+      setAiDiagnosticIsLoading(false);
+    }
+  };
+
+  const handleExplainPytestCode = async () => {
+    if (!pytestCode) return;
+    setAiExplanationIsLoading(true);
+    setAiExplanationResult("");
+    try {
+      const headers: any = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+      const res = await fetch("/api/mcp/agent-chat", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          prompt: `Explain the transpiled pytest code in detail. Focus on how the Javascript dynamic assertion triggers were parsed into standard Python assertion lines, the fixture mappings, and dynamic variables:\n\n${pytestCode}`,
+          customApiKey
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiExplanationResult(data.direct_response || data.finalResponse || data.response || "No code explanation feedback returned.");
+      } else {
+        const text = await res.text();
+        setAiExplanationResult(`Error during code explanation: ${text}`);
+      }
+    } catch (err: any) {
+      setAiExplanationResult(`Failed to execute code explanation: ${err.message}`);
+    } finally {
+      setAiExplanationIsLoading(false);
+    }
+  };
+
+  // Sidebar navigation lists grouped by domain
+  const sidebarGroups = [
+    {
+      title: "Workspace",
+      id: "workspace",
+      items: [
+        { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, role: "any" },
+        { id: "projects", label: "Projects", icon: Folder, role: "any" },
+        { id: "collections", label: "Collections", icon: Layers, role: "any" },
+      ]
+    },
+    {
+      title: "Testing",
+      id: "testing",
+      items: [
+        { id: "pytest_studio", label: "Pytest Studio", icon: Code, role: "any" },
+        { id: "execution_center", label: "Execution Center", icon: Play, role: "any" },
+      ]
+    },
+    ...(isAdmin ? [
+      {
+        title: "Administration",
+        id: "admin",
+        items: [
+          { id: "user_management", label: "Users", icon: Users, role: "Admin" },
+          { id: "audit_center", label: "Audit Logs", icon: ShieldCheck, role: "Admin" },
+          { id: "login_history", label: "Login History", icon: History, role: "Admin" },
+        ]
+      }
+    ] : []),
+    {
+      title: "Account",
+      id: "account",
+      items: [
+        { id: "profile", label: "Profile", icon: User, role: "any" },
+        { id: "settings", label: "Settings", icon: Sliders, role: "any" },
+      ]
+    }
+  ];
+
+  // Helper action to click items on the sidebar
+  const handleSidebarClick = (pageId: string) => {
+    if (pageId === "collections") {
+      setCurrentPage("projects");
+      setProjectTab("collection");
+    } else if (pageId === "pytest_studio") {
+      setCurrentPage("projects");
+      setProjectTab("pytest");
+    } else if (pageId === "execution_center") {
+      setCurrentPage("projects");
+      setProjectTab("execution");
+    } else if (pageId === "ai_analysis") {
+      setCurrentPage("projects");
+      setProjectTab("ai");
+    } else {
+      setCurrentPage(pageId as any);
+    }
+  };
+
   return (
-    <div className={`min-h-screen flex flex-col font-sans transition-colors duration-200 antialiased selection:bg-indigo-500/10 selection:text-indigo-500 ${bgMain}`}>
+    <div className={`min-h-screen flex flex-row font-sans transition-colors duration-200 antialiased selection:bg-indigo-505/10 selection:text-indigo-505 ${bgMain}`}>
       
-      {/* Top Editorial System Bar (Highly Technical and Sleek) */}
-      <div className={`${isDarkMode ? "bg-[#0b241d] text-[#beebd8]" : "bg-[#0c3127] text-[#dfebd5]"} text-[11px] font-mono py-1 px-4 tracking-wider flex justify-between items-center z-50 transition-colors`}>
-        <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
-          <span>POSTMAN-TO-PYTEST AUTO-MIGRATOR COMPREHENSIVE SUITE</span>
-        </div>
-        <div className="hidden md:flex items-center gap-6">
-          <span>ACTIVE INSTANCE: EXPRESS/VITE PRO</span>
-          <span>THEME: {isDarkMode ? "OBSIDIAN DEEP" : "ALABASTER MOCK-UP"}</span>
-          <span>UTC {new Date().toISOString().replace('T', ' ').substring(0, 19)}</span>
+      {/* MOBILE NAV TOGGLE OVERLAY */}
+      <div className="md:hidden fixed top-0 left-0 right-0 h-12 border-b z-40 px-4 flex items-center justify-between bg-[#111215]/90 backdrop-blur-md border-neutral-800">
+        <button 
+          onClick={() => setSidebarExpanded(!sidebarExpanded)}
+          className="p-1 text-neutral-400 hover:text-white"
+        >
+          <Menu className="h-5 w-5" />
+        </button>
+        <span className="text-xs uppercase font-mono tracking-widest text-indigo-400 font-bold">Pytestify Enterprise</span>
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-1 text-neutral-400">
+            {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
         </div>
       </div>
 
-      {/* Main Header navigation and Workspace context */}
-      <header className={`border-b ${borderCol} ${isDarkMode ? "bg-[#111215]" : "bg-[#fbfbfa]"} py-3 px-6 sticky top-0 z-40 transition-colors shadow-xs`}>
-        <div className="max-w-8xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-indigo-600 rounded-lg text-white shadow-sm flex items-center justify-center">
-              <Zap className="h-5 w-5 fill-white/10" />
+      {/* --- SIDEBAR CONTAINER --- */}
+      <aside 
+        className={`fixed md:sticky top-0 left-0 h-screen z-50 flex flex-col shrink-0 border-r ${borderCol} ${bgSide} transition-all duration-300 ${
+          sidebarExpanded ? "w-64 translate-x-0" : "w-16 md:w-16 -translate-x-[150%] md:translate-x-0"
+        } select-none`}
+      >
+        {/* Sidebar Header Brand block */}
+        <div className="h-16 flex items-center justify-between px-4 border-b border-neutral-800/20">
+          <div className="flex items-center gap-2.5 overflow-hidden">
+            <div className="p-2 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-lg text-white shadow-md shadow-indigo-500/10 flex items-center justify-center font-black shrink-0 font-sans">
+              <Zap className="h-4.5 w-4.5 fill-white/10" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className={`text-base font-display font-bold ${textTitle} tracking-tight`}>
+            {sidebarExpanded && (
+              <div className="flex flex-col text-left">
+                <span className={`text-[13px] font-extrabold tracking-tight ${textTitle} truncate font-display`}>
                   Pytestify Studio
-                </h1>
-                <span className="px-1.5 py-0.5 text-[8px] uppercase font-mono tracking-wider rounded bg-neutral-800 border border-neutral-700 text-amber-500 font-bold">
-                  v3.6 WORKSPACE
+                </span>
+                <span className="text-[9px] uppercase font-bold text-indigo-400 tracking-widest font-mono">
+                  Enterprise
                 </span>
               </div>
-              <p className="text-xs text-neutral-500 mt-0.5 font-light">
-                Professional API engine translating Chai JS dynamic actions to idiomatic pytest modules.
+            )}
+          </div>
+          
+          <button 
+            onClick={() => setSidebarExpanded(!sidebarExpanded)}
+            className="hidden md:flex p-1.5 hover:bg-neutral-800/10 dark:hover:bg-neutral-800/40 rounded-lg text-neutral-500 hover:text-neutral-300 transition shrink-0"
+          >
+            <ChevronLeft className={`h-4.5 w-4.5 transition duration-300 ${!sidebarExpanded ? "rotate-180" : ""}`} />
+          </button>
+        </div>
+
+        {/* Scrollable Navigation section */}
+        <div className="flex-grow overflow-y-auto px-3 py-4 space-y-5 scrollbar-thin">
+          {sidebarGroups.map((group) => (
+            <div key={group.id} className="space-y-1">
+              {sidebarExpanded && (
+                <span className="px-3 text-[9px] font-semibold tracking-wider text-neutral-500 uppercase font-mono block mb-1.5 text-left">
+                  {group.title}
+                </span>
+              )}
+              <div className="space-y-0.5">
+                {group.items.map((item) => {
+                  const isActive = 
+                    (item.id === "dashboard" && currentPage === "dashboard") ||
+                    (item.id === "projects" && currentPage === "projects" && (activeCloudProjectId === null || (projectTab !== "collection" && projectTab !== "pytest" && projectTab !== "execution"))) ||
+                    (item.id === "collections" && currentPage === "projects" && activeCloudProjectId !== null && projectTab === "collection") ||
+                    (item.id === "pytest_studio" && currentPage === "projects" && activeCloudProjectId !== null && projectTab === "pytest") ||
+                    (item.id === "execution_center" && currentPage === "projects" && activeCloudProjectId !== null && projectTab === "execution") ||
+                    (currentPage === item.id);
+
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => handleSidebarClick(item.id)}
+                      className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium font-sans border border-transparent transition cursor-pointer ${
+                        isActive
+                          ? "bg-indigo-600/10 text-indigo-400 border-indigo-500/15 font-semibold"
+                          : "text-neutral-500 hover:text-neutral-250 hover:bg-neutral-800/5 dark:hover:bg-neutral-800/20"
+                      }`}
+                      title={item.label}
+                    >
+                      <item.icon className={`h-4.5 w-4.5 shrink-0 ${isActive ? "text-indigo-400" : "text-neutral-500"}`} />
+                      {sidebarExpanded && <span className="truncate">{item.label}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* User context / system parameters at the bottom */}
+        <div className="p-3 border-t border-neutral-800/20 flex flex-col gap-2.5">
+          {session && (
+            <div className="flex items-center gap-2 px-1 py-1">
+              <div className="h-8 w-8 rounded-lg bg-neutral-800/80 border border-neutral-700/50 flex items-center justify-center text-xs font-mono font-bold text-neutral-300 tracking-wider shrink-0">
+                {userRole === "Admin" ? "AD" : "ST"}
+              </div>
+              {sidebarExpanded && (
+                <div className="flex flex-col text-left min-w-0 flex-1 font-sans">
+                  <span className="text-xs font-bold text-neutral-305 truncate font-sans" title={session.user?.email}>
+                    {session.user?.email?.split('@')[0]}
+                  </span>
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-widest font-mono truncate">
+                    {userRole}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+          
+          {sidebarExpanded && (
+            <button
+              onClick={async () => {
+                const supabase = await getSupabaseClient();
+                if (supabase) {
+                  await supabase.auth.signOut();
+                  setSession(null);
+                }
+              }}
+              className="w-full py-1 px-3 border border-rose-500/15 hover:border-rose-500 bg-rose-600/10 hover:bg-rose-600 text-rose-500 hover:text-white font-mono text-[10.5px] font-bold rounded-lg transition duration-200 cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <LogOut className="h-3.5 w-3.5 animate-pulse" />
+              Sign Out
+            </button>
+          )}
+        </div>
+      </aside>
+
+      {/* --- CONTENT CONTAINER --- */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-screen relative md:mt-0 pt-12 md:pt-0">
+        
+        {/* Top Editorial System Bar (Highly Technical and Sleek) */}
+        <div className={`${isDarkMode ? "bg-[#0b241d] text-[#beebd8]" : "bg-[#0c3127] text-[#dfebd5]"} text-[10px] font-mono py-1 px-5 tracking-wider flex justify-between items-center z-10 transition-colors`}>
+          <div className="flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
+            <span>POSTMAN-TO-PYTEST AUTO-MIGRATOR COMPREHENSIVE SUITE</span>
+          </div>
+          <div className="hidden md:flex items-center gap-6">
+            <span>ACTIVE INSTANCE: EXPRESS/VITE PRO</span>
+            <span>CLEARANCE: <strong className="text-emerald-400 font-bold uppercase">{userRole}</strong></span>
+            <span>THEME: {isDarkMode ? "OBSIDIAN DEEP" : "ALABASTER MOCK-UP"}</span>
+            <span>UTC {new Date().toISOString().replace('T', ' ').substring(0, 19)}</span>
+          </div>
+        </div>
+
+        {/* Content Header section */}
+        <header className={`border-b ${borderCol} ${isDarkMode ? "bg-[#111215]" : "bg-[#fbfbfa]"} py-4 px-6 sticky top-0 z-10 transition-colors shadow-xs flex justify-between items-center z-20`}>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setSidebarExpanded(!sidebarExpanded)}
+              className="p-1.5 rounded-lg border border-neutral-800 hover:bg-neutral-800 transition text-neutral-400 hover:text-white md:hidden"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
+            <div className="text-left">
+              <div className="flex items-center gap-2">
+                <h1 className={`text-sm md:text-base font-display font-bold ${textTitle} tracking-tight mt-0`}>
+                {currentPage === "dashboard" && "Dashboard Operations Center"}
+                {currentPage === "projects" && (activeCloudProjectId ? "Project Workspace IDE" : "Workspace Projects Folder")}
+                {currentPage === "audit_center" && "Enterprise Audit Center"}
+                {currentPage === "login_history" && "LDAP Login Trail"}
+                {currentPage === "user_management" && "Directory User list"}
+                {currentPage === "profile" && "LDAP Security Profile"}
+                {currentPage === "settings" && "General Workspace Settings"}
+              </h1>
+              <span className="hidden sm:inline px-1.5 py-0.5 text-[8.5px] uppercase font-mono tracking-widest rounded bg-neutral-800 border border-neutral-700/50 text-indigo-400 font-bold">
+                {userRole === "Admin" ? "SECURE-NODE-ADMIN" : "NODE-STAFF"}
+              </span>
+            </div>
+            <p className="text-[11px] text-neutral-400 mt-0.5 font-light font-sans leading-normal text-left">
+              {currentPage === "dashboard" && "Centralized corporate launchpad displaying repository metrics, system status, and logins."}
+              {currentPage === "projects" && (activeCloudProjectId ? `Workspace for managing endpoint compilation and simulated trials.` : "Create and select team-scoped Pytest migration sandboxes.")}
+              {currentPage === "audit_center" && "Secured trails for corporate audit compliance logs."}
+              {currentPage === "login_history" && "Active directory authentications and LDAP login sessions."}
+              {currentPage === "user_management" && "Toggle teammate clearance credentials and add corporate users."}
+              {currentPage === "profile" && "Your registered enterprise metadata and credentials."}
+              {currentPage === "settings" && "Configure Python compiler targets, API credentials, and visual presets."}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 w-full md:w-auto justify-end">
-            {/* Quick Dark Mode toggle in the top Bar */}
+          <div className="flex items-center gap-2">
             <button
               onClick={() => setIsDarkMode(!isDarkMode)}
-              className={`p-2 rounded-lg border ${borderCol} ${isDarkMode ? "hover:bg-neutral-800 text-yellow-400" : "hover:bg-neutral-100 text-indigo-500"} transition-all duration-200`}
+              className={`p-2 rounded-lg border ${borderCol} ${isDarkMode ? "hover:bg-neutral-805 bg-black/20 text-yellow-555" : "hover:bg-neutral-100 bg-neutral-50 text-indigo-505"} transition-all duration-200`}
               title={isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
             >
-              {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              {isDarkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
             </button>
 
             <button
               id="reset-samples-btn-header"
               onClick={fetchSampleExamples}
-              className={`px-3 py-2 text-xs font-mono font-medium rounded-lg border ${borderCol} ${isDarkMode ? "text-neutral-300 hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-100"} transition flex items-center gap-1.5`}
+              className={`px-3 py-1.5 text-[11px] font-mono font-medium rounded-lg border ${borderCol} ${isDarkMode ? "text-neutral-300 hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-100"} transition flex items-center gap-1.5`}
             >
               <RefreshCw className="h-3.5 w-3.5" />
               Reset Samples
             </button>
-
-
-
-            {/* Dynamic Supabase Auth State Controls */}
-            <div className={`flex items-center gap-2.5 border-l ${borderCol} pl-3 ml-1`}>
-              {!session ? (
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-1 text-[10px] font-mono tracking-widest text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded-lg font-bold uppercase">
-                    Guest Mode
-                  </span>
-                  <button
-                    onClick={() => setIsAuthModalOpen(true)}
-                    className="px-3 py-2 text-xs font-mono font-bold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition shadow-sm cursor-pointer"
-                  >
-                    Sign In
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-1 text-[10px] font-mono tracking-widest text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg font-bold uppercase flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
-                    Logged In
-                  </span>
-                  
-                  <div className={`px-2.5 py-1.5 rounded-lg border ${borderCol} ${bgAccent} flex items-center gap-1.5 max-w-[150px]`}>
-                    <span className="text-[11px] font-mono font-bold truncate text-neutral-300" title={session.user?.email}>
-                      {session.user?.email?.split('@')[0]}
-                    </span>
-                  </div>
-
-                  <button
-                    onClick={() => setIsChangePasswordModalOpen(true)}
-                    className={`px-2 py-1.5 rounded-lg border ${borderCol} ${bgAccent} hover:bg-indigo-600/10 text-neutral-300 hover:text-indigo-400 font-mono text-[10px] tracking-wide font-extrabold transition cursor-pointer flex items-center gap-1`}
-                    title="Change Password"
-                  >
-                    PASS
-                  </button>
-
-                  <button
-                    onClick={async () => {
-                      const s = await getSupabaseClient();
-                      if (s) {
-                        try {
-                          await fetch("/api/users/sync", {
-                            method: "POST",
-                            headers: {
-                              "Content-Type": "application/json",
-                              "Authorization": `Bearer ${session.access_token}`
-                            },
-                            body: JSON.stringify({
-                              isLogoutEvent: true
-                            })
-                          });
-                        } catch (logErr) {
-                          console.warn("Silent logout sync failure:", logErr);
-                        }
-                        await s.auth.signOut();
-                        setActiveCloudProjectId(null);
-                        localStorage.removeItem("pytestify_skipped_login");
-                      }
-                    }}
-                    className={`p-2 rounded-lg border border-red-500/20 bg-red-500/5 hover:bg-red-500/15 text-red-400 transition cursor-pointer`}
-                    title="Sign Out Workspace"
-                  >
-                    {/* Compact Sign Out door symbol using small rotated line */}
-                    <span className="text-[11px] font-mono font-bold px-0.5">OUT</span>
-                  </button>
-                </div>
-              )}
-            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* Primary Triple-Pane Workspace Layout mirroring advanced API tools */}
-      <div className="flex-1 flex flex-col xl:flex-row items-stretch">
-        
-        {/* Left Side Icon Navigation Rail (VS Code / Postman Style) */}
-        <section className={`w-14 items-center flex xl:flex-col justify-start border-r ${borderCol} ${bgSide} py-4 px-2 gap-5 text-center shrink-0`}>
-          <button
-            onClick={() => { setActiveRailTab("explorer"); if (collectionSource === "settings") setCollectionSource("upload"); }}
-            className={`p-2.5 rounded-xl transition ${activeRailTab === "explorer" ? "bg-indigo-600 text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
-            title="Collection Explorer"
-          >
-            <Folder className="h-5 w-5" />
-          </button>
-          
-          <button
-            onClick={() => { setActiveRailTab("settings"); setCollectionSource("settings"); }}
-            className={`p-2.5 rounded-xl transition ${activeRailTab === "settings" ? "bg-indigo-600 text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
-            title="Pytest Configurations"
-          >
-            <Sliders className="h-5 w-5" />
-          </button>
-
-          <button
-            onClick={() => {
-              if (!session) {
-                setIsAuthModalOpen(true);
-              } else {
-                setActiveRailTab("dashboard");
-              }
-            }}
-            className={`p-2.5 rounded-xl transition relative ${activeRailTab === "dashboard" ? "bg-indigo-600 text-white shadow-md" : isDarkMode ? "text-neutral-400 hover:text-white hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
-            title="My Cloud Projects (Database)"
-          >
-            <Database className="h-5 w-5" />
-            {!session && (
-              <span className="absolute top-1 right-1 w-2 h-2 bg-amber-500 rounded-full border border-neutral-900"></span>
-            )}
-          </button>
-
-
-
-          <div className="flex-1 hidden xl:block"></div>
-
-          {/* Theme switcher on Rail bottom */}
-          <button
-            onClick={() => setIsDarkMode(!isDarkMode)}
-            className={`p-2.5 rounded-xl transition hidden xl:block ${isDarkMode ? "text-yellow-400 hover:bg-neutral-800" : "text-neutral-600 hover:bg-neutral-200"}`}
-          >
-            {isDarkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
-          </button>
-        </section>
-
-        {/* Triple Pane Split Grid */}
-        <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 items-stretch divide-y lg:divide-y-0 lg:divide-x divide-neutral-800/20">
-          
-          {/* PANE 1: SOURCE MANAGEMENT & TREE TREE DIRECTORY (col-span-4) */}
-          <div className="lg:col-span-4 flex flex-col p-4 md:p-5 gap-5">
-            {activeRailTab === "dashboard" && session ? (
-              <MyProjectsDashboard
-                isDarkMode={isDarkMode}
-                authToken={session?.access_token || ""}
-                activeProjectId={activeCloudProjectId}
-                onSelectProject={handleSelectProject}
-                onProjectDeselect={() => setActiveCloudProjectId(null)}
-                onCreateNewProject={(pId) => {
-                  setActiveCloudProjectId(pId);
-                  setActiveRailTab("explorer");
-                }}
-              />
-            ) : (
-              <>
-                {/* Source Tab Header */}
-                <div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-[10px] font-mono uppercase tracking-widest text-[#6366f1] font-bold">PANE 1 • CLIENT INTAKE</span>
-                    {activeCloudProjectId ? (
-                      <span className="px-1.5 py-0.5 text-[8px] font-mono font-bold uppercase rounded bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
-                        CLOUD SYNCED
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-mono text-neutral-400">SELECT IMPORT SOURCE</span>
-                    )}
-                  </div>
-              <h2 className={`text-sm font-display font-bold ${textTitle} mt-0.5`}>
-                Source API Repository
-              </h2>
-            </div>
-
-            {/* Selector Grid for Imports */}
-            <div className={`grid grid-cols-3 p-1 ${isDarkMode ? "bg-neutral-900 border-neutral-800" : "bg-neutral-100 border-neutral-200"} rounded-lg border font-mono`}>
-              <button
-                type="button"
-                onClick={() => { setCollectionSource("upload"); setActiveRailTab("explorer"); }}
-                className={`py-1.5 text-[10px] sm:text-xs font-medium rounded-md transition-all ${
-                  collectionSource === "upload"
-                    ? "bg-indigo-600 text-white shadow-sm"
-                    : isDarkMode ? "text-neutral-400 hover:text-neutral-200" : "text-neutral-500 hover:text-neutral-800"
-                }`}
-              >
-                Upload File
-              </button>
-              <button
-                type="button"
-                onClick={() => { setCollectionSource("postman"); setActiveRailTab("explorer"); }}
-                className={`py-1.5 text-[10px] sm:text-xs font-medium rounded-md transition-all ${
-                  collectionSource === "postman"
-                    ? "bg-indigo-600 text-white shadow-sm"
-                    : isDarkMode ? "text-neutral-400 hover:text-neutral-200" : "text-neutral-500 hover:text-neutral-800"
-                }`}
-              >
-                Postman Cloud
-              </button>
-              <button
-                type="button"
-                onClick={() => { setCollectionSource("sample"); setActiveRailTab("explorer"); }}
-                className={`py-1.5 text-[10px] sm:text-xs font-medium rounded-md transition-all ${
-                  collectionSource === "sample"
-                    ? "bg-indigo-600 text-white shadow-sm"
-                    : isDarkMode ? "text-neutral-400 hover:text-neutral-200" : "text-neutral-500 hover:text-neutral-800"
-                }`}
-              >
-                Built-in Market
-              </button>
-            </div>
-
-            {/* RENDER ACTIVE IMPORT SOURCE CARD */}
-            <div className={`border ${borderCol} rounded-xl p-4 ${bgAccent}`}>
-              {/* FILE UPLOAD DISPLAY */}
-              {collectionSource === "upload" && (
-                <div
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                  className={`border border-dashed rounded-lg p-5 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2 group ${
-                    dragOver
-                      ? "border-indigo-500 bg-indigo-500/5"
-                      : isDarkMode 
-                      ? "border-neutral-700 bg-neutral-900/40 hover:bg-neutral-900/80" 
-                      : "border-neutral-300 bg-white hover:bg-neutral-50"
-                  }`}
-                >
-                  <input
-                    type="file"
-                    accept=".json"
-                    ref={fileInputRef}
-                    onChange={handleFileChange}
-                    className="hidden"
-                  />
-                  <div className={`p-2 rounded-full ${isDarkMode ? "bg-neutral-800" : "bg-neutral-100"} text-indigo-500 group-hover:scale-105 transition-transform duration-200`}>
-                    <UploadCloud className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <p className="text-xs font-semibold">Drop Postman v2.1 export here</p>
-                    <p className="text-[10px] text-neutral-400 mt-0.5">or click to browse local files</p>
-                  </div>
-                </div>
-              )}
-
-              {/* POSTMAN CLOUD INTEGRATION */}
-              {collectionSource === "postman" && (
-                <div className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-1">
-                    <label className="text-[9px] font-mono font-bold text-neutral-400 uppercase tracking-widest flex items-center gap-1">
-                      <Key className="h-3 w-3" />
-                      Postman API Key
-                    </label>
-                    <div className="relative">
-                      <input
-                        type="password"
-                        placeholder="PMAK-xxxxxx-xxxx-xxxx"
-                        value={postmanApiKey}
-                        onChange={(e) => setPostmanApiKey(e.target.value)}
-                        className={`w-full text-xs pl-3 pr-20 py-2 border rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono ${selectStyle}`}
-                      />
-                      <button
-                        onClick={handleConnectPostman}
-                        disabled={isPostmanKeyLoading}
-                        className="absolute right-1 top-1 bottom-1 px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[9px] font-mono font-bold transition flex items-center"
-                      >
-                        {isPostmanKeyLoading ? "Sync..." : "Fetch"}
-                      </button>
-                    </div>
-                  </div>
-
-                  {workspaces.length > 0 && (
-                    <div className="grid grid-cols-1 gap-2 pt-2 border-t border-neutral-800/40">
-                      <div className="flex flex-col gap-0.5">
-                        <label className="text-[9px] font-mono font-bold text-neutral-400 uppercase">Workspaces</label>
-                        <select
-                          value={selectedWorkspace}
-                          onChange={(e) => handleWorkspaceChange(e.target.value)}
-                          className={`py-1 px-2 border rounded-md text-xs font-medium ${selectStyle}`}
-                        >
-                          {workspaces.map((w) => (
-                            <option key={w.id} value={w.id}>{w.name}</option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="flex flex-col gap-0.5">
-                        <label className="text-[9px] font-mono font-bold text-neutral-400 uppercase">Search Collections</label>
-                        <div className="relative">
-                          <input
-                            type="text"
-                            placeholder="Type to filter..."
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className={`w-full py-1.5 pl-7 pr-2.5 border rounded-md text-xs ${selectStyle}`}
-                          />
-                          <Search className="absolute left-2.5 top-2.5 h-3 w-3 text-neutral-500" />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {collections.length > 0 && (
-                    <div className="flex flex-col gap-1 pt-2 border-t border-neutral-800/20">
-                      <div className="text-[9px] font-mono text-neutral-400 uppercase flex justify-between items-center">
-                        <span>Collections ({filteredCollections.length})</span>
-                        {isCollectionsLoading && <RefreshCw className="h-2.5 w-2.5 animate-spin text-indigo-500" />}
-                      </div>
-                      <div className="max-h-36 overflow-y-auto border border-neutral-800/40 rounded-lg divide-y divide-neutral-800/45 bg-[#0f1011]">
-                        {filteredCollections.map((col) => (
-                          <button
-                            key={col.id}
-                            onClick={() => handleSelectPostmanCollection(col.uid)}
-                            className={`w-full text-left p-2 transition flex justify-between items-center text-[11px] ${
-                              selectedCollectionUid === col.uid
-                                ? "bg-indigo-500/10 text-indigo-400 font-semibold"
-                                : "hover:bg-neutral-800 text-neutral-400"
-                            }`}
-                          >
-                            <span className="truncate pr-1">{col.name}</span>
-                            <span className="text-[8px] font-mono px-1.5 py-0.5 bg-indigo-600 text-white rounded">Import</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* BUILT-IN DEMO MARKET */}
-              {collectionSource === "sample" && (
-                <div className="flex flex-col gap-2.5">
-                  <div className="text-[11px] text-neutral-400 leading-relaxed">
-                    Instantly inject developer verified specimen folders with robust custom validation assertions and environments:
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    {sampleCollections.map((sample) => (
-                      <button
-                        key={sample.id || sample.name}
-                        onClick={() => handleSelectSample(sample)}
-                        className={`text-left p-2 border rounded-lg transition duration-200 hover:border-indigo-500 hover:bg-indigo-500/5 group ${
-                          collectionName === sample.name
-                            ? "border-indigo-500 bg-indigo-500/10 text-indigo-600"
-                            : isDarkMode 
-                              ? "border-neutral-700/80 bg-neutral-900/30" 
-                              : "border-neutral-200 bg-white"
-                        }`}
-                      >
-                        <h4 className={`text-xs font-bold ${isDarkMode ? "text-neutral-200" : "text-neutral-800"} group-hover:text-indigo-600`}>{sample.name}</h4>
-                        <span className="text-[9px] text-indigo-500/95 font-mono inline-block mt-1">Load specimen endpoints →</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* PANE 1 SYSTEM CONFIGS TAB (SETTINGS DIRECT VIEW) */}
-              {collectionSource === "settings" && (
-                <div className="flex flex-col gap-3">
-                  <div className="text-[9.5px] font-mono text-neutral-400 uppercase tracking-widest flex items-center gap-1.5 pb-1 border-b border-neutral-800/20">
-                    <Sliders className="h-3.5 w-3.5 text-neutral-400" />
-                    Tuning Variables
-                  </div>
-                  <div className="flex flex-col gap-2.5">
-                    <div className="flex flex-col gap-0.5">
-                      <span className="text-[9px] font-mono text-neutral-400 uppercase">Pytest driver framework</span>
-                      <select
-                        value={library}
-                        onChange={(e) => setLibrary(e.target.value as any)}
-                        className={`py-1 px-2 border rounded text-xs select-none ${selectStyle}`}
-                      >
-                        <option value="requests">requests (Sync)</option>
-                        <option value="httpx">httpx (Modern Sync)</option>
-                        <option value="async_httpx">httpx (Asyncio Concurrency)</option>
-                      </select>
-                    </div>
-
-                    <div className="flex flex-col gap-0.5">
-                      <span className="text-[9px] font-mono text-neutral-400 uppercase">Override target hostname</span>
-                      <input
-                        type="text"
-                        placeholder="https://api.yourdomain.com"
-                        value={baseUrlEnv}
-                        onChange={(e) => setBaseUrlEnv(e.target.value)}
-                        className={`py-1 px-2 border rounded text-xs font-mono ${selectStyle}`}
-                      />
-                    </div>
-
-                    <div className="flex flex-col gap-2 pt-2 border-t border-neutral-800/10">
-                      <label className="flex items-start gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={injectBaseUrlFixture}
-                          onChange={(e) => setInjectBaseUrlFixture(e.target.checked)}
-                          className="rounded border-neutral-700 text-indigo-500 focus:ring-indigo-500 h-3.5 w-3.5 mt-0.5"
-                        />
-                        <div className={`text-[11px] leading-tight ${isDarkMode ? "text-neutral-400" : "text-neutral-600"}`}>
-                          <span className={`font-semibold block ${isDarkMode ? "text-neutral-200" : "text-neutral-850"}`}>Synthesize conftest.py</span>
-                          Include general base URL fixtures in distribution.
-                        </div>
-                      </label>
-
-                      <label className="flex items-start gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={addComments}
-                          onChange={(e) => setAddComments(e.target.checked)}
-                          className="rounded border-neutral-700 text-indigo-500 focus:ring-indigo-500 h-3.5 w-3.5 mt-0.5"
-                        />
-                        <div className={`text-[11px] leading-tight ${isDarkMode ? "text-neutral-400" : "text-neutral-600"}`}>
-                          <span className={`font-semibold block ${isDarkMode ? "text-neutral-200" : "text-neutral-850"}`}>Include source line commentary</span>
-                          Comment active assertions with original Chai.js equivalents.
-                        </div>
-                      </label>
-                    </div>
-
-                    <div className="flex flex-col gap-1.5 pt-2.5 border-t border-neutral-800/10">
-                      <span className="text-[9px] font-mono text-amber-500 uppercase font-bold flex items-center gap-1">
-                        <Key className="h-3 w-3" />
-                        Fallback Gemini API Key (Optional)
-                      </span>
-                      <p className={`${isDarkMode ? "text-neutral-500" : "text-neutral-400"} text-[9.5px]/snug font-light`}>
-                        If the app's default token limits run out or get busy, supply your own key to secure immediate translation tasks.
-                      </p>
-                      <input
-                        type="password"
-                        placeholder="AIzaSy..."
-                        value={customApiKey}
-                        onChange={(e) => setCustomApiKey(e.target.value)}
-                        className={`py-1.5 px-2 border rounded text-xs font-mono placeholder:text-neutral-600 ${selectStyle}`}
-                      />
-                      {customApiKey && (
-                        <div className="flex justify-between items-center text-[9px] font-mono text-emerald-500 bg-emerald-500/5 px-2 py-0.5 rounded border border-emerald-500/10 mt-0.5">
-                          <span>✓ Active local key override</span>
-                          <button
-                            onClick={() => setCustomApiKey("")}
-                            className="hover:underline text-neutral-400 text-[8px]"
-                          >
-                            Clear
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* ERROR DISPLAY AREA */}
-            {errorMessage && (
-              <div className="p-3 bg-red-950/20 border border-red-900/50 rounded-xl text-red-400 text-xs flex items-start gap-2.5 animate-pulse">
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-500" />
-                <div className="flex-1">
-                  <span className="font-bold block text-[9px] tracking-wider uppercase font-mono">Assertion Error</span>
-                  <p className="mt-0.5 text-[10px] font-mono break-all leading-normal">{errorMessage}</p>
-                </div>
-              </div>
-            )}
-
-            {/* ENDPOINT EXPLORER TREE VIEW - SIMILAR TO POSTMAN SIDEBAR */}
-            {collectionName && (
-              <div className={`border ${borderCol} rounded-xl overflow-hidden ${bgAccent} flex-1 flex flex-col min-h-[190px]`}>
-                <div className={`px-4 py-2 border-b ${borderCol} ${isDarkMode ? "bg-neutral-900" : "bg-neutral-50"} text-[9px] font-mono uppercase tracking-widest text-neutral-400 flex justify-between items-center`}>
-                  <div className="flex items-center gap-1">
-                    <Database className="h-3.5 w-3.5 text-indigo-500" />
-                    <span>Tree Explorer</span>
-                  </div>
-                  <span>{collectionItems.length} Requests</span>
-                </div>
-                
-                <div className="flex-grow p-2.5 overflow-y-auto max-h-[350px] divide-y divide-neutral-800/10 flex flex-col gap-1 text-xs">
-                  {collectionItems.map((item, index) => {
-                    const isSelected = selectedRequestIndex === index;
-                    const method = item.request.method || "GET";
-                    
-                    let badgeColor = "bg-emerald-500/10 text-emerald-500 border-emerald-500/20";
-                    if (method === "POST") badgeColor = "bg-amber-500/10 text-amber-500 border-amber-500/20";
-                    if (method === "PUT") badgeColor = "bg-blue-500/10 text-blue-500 border-blue-500/20";
-                    if (method === "DELETE") badgeColor = "bg-rose-500/10 text-rose-500 border-rose-500/20";
-
-                    return (
-                      <button
-                        key={index}
-                        onClick={() => setSelectedRequestIndex(index)}
-                        className={`w-full text-left p-2 rounded-lg flex items-center justify-between gap-2.5 border transition ${
-                          isSelected 
-                            ? isDarkMode
-                              ? "bg-neutral-800/50 border-indigo-500/65 text-white shadow-xs"
-                              : "bg-neutral-100 border-indigo-500/65 text-neutral-950 font-medium"
-                            : "border-transparent hover:bg-neutral-800/10"
-                        }`}
-                      >
-                        <div className="truncate flex-1">
-                          <span className="font-semibold block truncate leading-normal">{item.name}</span>
-                          <span className="text-[10px] font-mono text-neutral-500 block truncate mt-0.5">{item.request.url}</span>
-                        </div>
-                        <span className={`px-1.5 py-0.5 text-[8px] font-mono font-bold rounded border ${badgeColor}`}>
-                          {method}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Stage Action Core CTA */}
-            <button
-              onClick={handleMigrate}
-              disabled={isMigrating || collectionItems.length === 0}
-              className={`w-full py-3.5 rounded-xl font-mono font-bold text-xs uppercase tracking-wider text-white transition transform flex items-center justify-center gap-2 ${
-                collectionItems.length === 0
-                  ? "bg-neutral-800 text-neutral-500 cursor-not-allowed border border-neutral-700/50"
-                  : "bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-700 hover:to-indigo-600 active:scale-98 shadow-md"
-              }`}
+        {/* View Frame Outer scrolling canvas */}
+        <main className="flex-grow overflow-y-auto p-4 md:p-6 w-full max-w-7xl mx-auto flex flex-col gap-6">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={currentPage + (activeCloudProjectId ? `-${activeCloudProjectId}-${projectTab}` : "")}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.2 }}
+              className="flex-grow flex flex-col"
             >
-              {isMigrating ? (
-                <>
-                  <RefreshCw className="h-4 w-4 animate-spin text-white" />
-                  Compiling AST mapping...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="h-4 w-4 text-indigo-300 animate-pulse fill-indigo-300/25" />
-                  Compile Pytest Suite
-                </>
+              {/* PAGE 1: DASHBOARD */}
+              {currentPage === "dashboard" && (
+                <div className="space-y-6">
+                  <DashboardPanel
+                    isDarkMode={isDarkMode}
+                    borderCol={borderCol}
+                    bgAccent={bgAccent}
+                    textTitle={textTitle}
+                    session={session}
+                    collectionName={collectionName}
+                    execResult={execResult}
+                    mcpTools={mcpTools}
+                    activeCloudProjectId={activeCloudProjectId}
+                    handleSelectProject={handleSelectProject}
+                    setActiveCloudProjectId={setActiveCloudProjectId}
+                    setActiveTabId={(tabId) => {
+                      setCurrentPage("projects");
+                      if (tabId === "collections") setProjectTab("collection");
+                      if (tabId === "pytest_consolidated") setProjectTab("pytest");
+                      if (tabId === "runner") setProjectTab("execution");
+                    }}
+                  />
+
+                  {/* ADMIN ONLY LANDING AREA OVERVIEW */}
+                  {isAdmin && (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 border-t border-neutral-800/20 pt-6">
+                      <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} space-y-3`}>
+                        <div className="flex justify-between items-center pb-2 border-b border-neutral-800/10 dark:border-neutral-800/40">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 font-mono flex items-center gap-1.5">
+                            <History className="h-4 w-4" /> Recent LDAP Logins (Admin Only)
+                          </span>
+                          <button onClick={() => setCurrentPage("login_history")} className="text-[10.5px] text-indigo-400 hover:underline font-mono">
+                            View All →
+                          </button>
+                        </div>
+                        <AdminPortal session={session} isDarkMode={isDarkMode} overrideTab="login" hideStats={true} />
+                      </div>
+
+                      <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} space-y-3`}>
+                        <div className="flex justify-between items-center pb-2 border-b border-neutral-800/10 dark:border-neutral-800/40">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-rose-500 font-mono flex items-center gap-1.5">
+                            <ShieldCheck className="h-4 w-4" /> Recent Security Audits (Admin Only)
+                          </span>
+                          <button onClick={() => setCurrentPage("audit_center")} className="text-[10.5px] text-[#f43f5e] hover:underline font-mono">
+                            View All →
+                          </button>
+                        </div>
+                        <AdminPortal session={session} isDarkMode={isDarkMode} overrideTab="audit" hideStats={true} />
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
-            </button>
-              </>
-            )}
-          </div>
 
-          {/* PANE 2: POSTMAN REQUEST SPEC TAB INTERFACE (col-span-8 - Left nested) AND DETAILED CODE WRITER */}
-          <div className="lg:col-span-8 flex flex-col p-4 md:p-6 gap-6 overflow-hidden">
-            
-            {/* Top Workspace Section 2 Header */}
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-              <div>
-                <span className="text-[10px] font-mono uppercase tracking-widest text-[#6366f1] font-bold block">PANE 2 • DEVELOPER SPECIFICATION TAB</span>
-                <h2 className={`text-base font-display font-medium ${textTitle} mt-0.5`}>
-                  {collectionName || "Empty Workspace Instance"}
-                </h2>
-              </div>
-              
-              <div className="flex border-b border-neutral-800/40 text-xs overflow-x-auto gap-1 self-stretch sm:self-auto font-mono py-1">
-                <button
-                  onClick={() => setActiveTab("consolidated")}
-                  className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                    activeTab === "consolidated"
-                      ? "border-indigo-500 text-indigo-500 font-bold"
-                      : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
-                  }`}
-                >
-                  <Code className="h-4 w-4" />
-                  Consolidated Suite
-                </button>
-                <button
-                  onClick={() => setActiveTab("modular")}
-                  className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                    activeTab === "modular"
-                      ? "border-indigo-500 text-indigo-500 font-bold"
-                      : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
-                  }`}
-                >
-                  <Layers className="h-4 w-4" />
-                  Modular Code Files
-                </button>
-                <button
-                  onClick={() => setActiveTab("run")}
-                  className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                    activeTab === "run"
-                      ? "border-indigo-500 text-indigo-500 font-bold"
-                      : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
-                  }`}
-                >
-                  <Activity className="h-4 w-4" />
-                  Live Runner
-                </button>
-                <button
-                  onClick={() => setActiveTab("mcp")}
-                  className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                    activeTab === "mcp"
-                      ? "border-indigo-500 text-indigo-500 font-bold"
-                      : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
-                  }`}
-                >
-                  <Cpu className="h-4 w-4 text-emerald-500 animate-pulse" />
-                  MCP Hub
-                </button>
-                {session?.user?.role === "Admin" && (
-                  <button
-                    id="tab-btn-directory-audit"
-                    onClick={() => setActiveTab("audit")}
-                    className={`py-1.5 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                      activeTab === "audit"
-                        ? "border-amber-500 text-amber-500 font-bold"
-                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-neutral-300" : "hover:text-neutral-800"}`
-                    }`}
-                  >
-                    <ShieldCheck className="h-4 w-4 text-amber-500 animate-pulse" />
-                    Directory & Logs
-                  </button>
-                )}
-
-              </div>
-            </div>
-
-            {/* IN-DEPTH POSTMAN WORKSPACE REPRESENTATION */}
-            {selectedRequest ? (
-              <div className={`border ${borderCol} rounded-2xl overflow-hidden ${bgAccent} flex flex-col text-xs shadow-md`}>
-                
-                {/* Method Badged Request Bar */}
-                <div className={`p-4 bg-neutral-900/30 border-b ${borderCol} flex flex-col md:flex-row items-stretch md:items-center gap-3`}>
-                  <div className="flex items-stretch gap-2 flex-grow">
-                    <span className={`px-3.5 py-2 font-mono font-bold uppercase rounded-lg border text-sm flex items-center shrink-0 ${
-                      selectedRequest.request.method === "POST" 
-                        ? "bg-amber-500/10 text-amber-500 border-amber-500/20" 
-                        : selectedRequest.request.method === "DELETE"
-                        ? "bg-rose-500/10 text-rose-500 border-rose-500/20"
-                        : selectedRequest.request.method === "PUT"
-                        ? "bg-blue-500/10 text-blue-500 border-blue-500/20"
-                        : "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
-                    }`}>
-                      {selectedRequest.request.method || "GET"}
-                    </span>
-                    <div className={`${isDarkMode ? "bg-[#121314] text-[#79c0ff] border-neutral-700/50" : "bg-neutral-100 text-blue-600 border-neutral-200"} font-mono px-3 py-2 rounded-lg border select-all flex-grow truncate flex items-center justify-between`}>
-                      <span className="truncate">{selectedRequest.request.url || "https://api.example.com"}</span>
-                      <span className={`text-[9px] uppercase ${isDarkMode ? "text-neutral-500" : "text-neutral-400"} px-1 font-mono tracking-widest shrink-0 self-center`}>Chai JS Source</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={handleMigrate}
-                    className="bg-indigo-600/10 hover:bg-indigo-600/15 text-indigo-500 border border-indigo-500/30 font-mono font-semibold py-2 px-4 rounded-lg flex items-center justify-center gap-2 tracking-wide text-xs"
-                  >
-                    <Send className="h-3 w-3 translate-x-px" />
-                    Convert
-                  </button>
-                </div>
-
-                {/* Postman Mock Tabs Selector */}
-                <div className={`border-b ${borderCol} flex px-4 ${isDarkMode ? "bg-neutral-900/10" : "bg-neutral-100"} overflow-x-auto text-xs gap-4 font-mono`}>
-                  <button
-                    onClick={() => setReqActiveTab("chai")}
-                    className={`py-2 px-1 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                      reqActiveTab === "chai"
-                        ? `border-indigo-500 ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
-                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-indigo-500" : "hover:text-black"}`
-                    }`}
-                  >
-                    Workspace Tests ({selectedRequest.event?.[0]?.script?.exec?.length || 0})
-                  </button>
-                  <button
-                    onClick={() => setReqActiveTab("headers")}
-                    className={`py-2 px-1 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                      reqActiveTab === "headers"
-                        ? `border-indigo-500 ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
-                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-indigo-500" : "hover:text-black"}`
-                    }`}
-                  >
-                    Headers ({selectedRequest.request.headers?.length || 0})
-                  </button>
-                  <button
-                    onClick={() => setReqActiveTab("body")}
-                    className={`py-2 px-1 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-                      reqActiveTab === "body"
-                        ? `border-indigo-500 ${isDarkMode ? "text-white" : "text-neutral-900"} font-bold`
-                        : `border-transparent text-neutral-500 ${isDarkMode ? "hover:text-indigo-500" : "hover:text-black"}`
-                    }`}
-                  >
-                    JSON Body Setup
-                  </button>
-                </div>
-
-                {/* Postman Mock Tabs Content */}
-                <div className={`p-4 ${isDarkMode ? "bg-[#121314]" : "bg-neutral-50"} overflow-x-auto text-[11px] leading-relaxed select-all`}>
-                  
-                  {/* TAB 1: ORIGINAL JS ASSERTIONS */}
-                  {reqActiveTab === "chai" && (
-                    <div className="flex flex-col gap-1 min-h-[120px] max-h-[220px] overflow-y-auto">
-                      {(selectedRequest.event?.[0]?.script?.exec && selectedRequest.event[0].script.exec.length > 0) ? (
-                        selectedRequest.event[0].script.exec.map((line, idx) => (
-                          <div key={idx} className={`flex gap-4 ${isDarkMode ? "hover:bg-neutral-800/30" : "hover:bg-neutral-200/50"} whitespace-pre`}>
-                            <span className="text-neutral-500 block w-6 select-none shrink-0 text-right">{idx+1}</span>
-                            <HighlightJsExpression code={line} />
-                          </div>
-                        ))
-                      ) : (
-                        <div className="text-neutral-500 italic p-4 text-center">
-                          No pre-written JavaScript asserts found in this step. Pytestify will synthesize standard response code 200 checks.
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* TAB 2: HEADERS LIST */}
-                  {reqActiveTab === "headers" && (
-                    <div className="min-h-[120px] max-h-[220px] overflow-y-auto">
-                      {selectedRequest.request.headers && selectedRequest.request.headers.length > 0 ? (
-                        <table className="w-full border-collapse font-mono text-[10.5px]">
-                          <thead>
-                            <tr className={`border-b ${isDarkMode ? "border-neutral-800 text-neutral-500" : "border-neutral-200 text-neutral-500"}`}>
-                              <th className="text-left py-1 text-[9px] uppercase tracking-wider">Key Header</th>
-                              <th className="text-left py-1 text-[9px] uppercase tracking-wider">Value</th>
-                            </tr>
-                          </thead>
-                          <tbody className={`divide-y ${isDarkMode ? "divide-neutral-800/40 text-neutral-300" : "divide-neutral-200 text-neutral-700"}`}>
-                            {selectedRequest.request.headers.map((h, i) => (
-                              <tr key={i} className={isDarkMode ? "hover:bg-neutral-800/20" : "hover:bg-neutral-200/40"}>
-                                <td className={`py-1.5 pr-4 ${isDarkMode ? "text-indigo-400" : "text-indigo-600"} select-all`}>{h.key}</td>
-                                <td className="py-1.5 select-all text-neutral-500">{h.value}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      ) : (
-                        <div className="text-neutral-500 italic p-4 text-center font-mono">
-                          No HTTP headers configured. Standard Content-Type: application/json will be assumed.
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* TAB 3: BODY LAYOUT */}
-                  {reqActiveTab === "body" && (
-                    <div className="min-h-[120px] max-h-[220px] overflow-y-auto">
-                      {selectedRequest.request.body ? (
-                        <pre className={`${isDarkMode ? "text-neutral-300" : "text-neutral-700"} font-mono text-[10.5px] leading-relaxed max-w-full select-all`}>
-                          <code>{selectedRequest.request.body}</code>
-                        </pre>
-                      ) : (
-                        <div className="text-neutral-500 italic p-4 text-center font-mono">
-                          No raw payload body for this request format (GET/DELETE etc).
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                </div>
-              </div>
-            ) : (
-              <div className={`p-8 border border-dashed ${borderCol} rounded-xl text-center text-neutral-500 text-xs`}>
-                Provide an API collection file above to explore detailed endpoint specifications.
-              </div>
-            )}
-
-            {/* TAB AREA 1: CONSOLIDATED CODE SUITE (With realistic IDE look) */}
-            {activeTab === "consolidated" && (
-              <div className="flex flex-col gap-5">
-                {!pytestCode ? (
-                  <div className={`rounded-2xl border ${borderCol} ${bgAccent} p-12 text-center flex flex-col items-center justify-center gap-4 shadow-sm`}>
-                    <div className="p-3 bg-indigo-500/10 rounded-full text-indigo-500 border border-indigo-500/20 animate-pulse">
-                      <Code className="h-7 w-7" />
-                    </div>
-                    <div>
-                      <h3 className="text-xs font-semibold">No Compiled Code</h3>
-                      <p className="text-[11px] text-neutral-500 max-w-xs mx-auto mt-1 leading-normal">
-                        Click the "Compile Pytest Suite" button to trigger the AST assertion mapping system.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-4">
-                    
-                    {/* Action buttons bar */}
-                    <div className={`flex flex-wrap justify-between items-center gap-2.5 p-3 rounded-xl border ${borderCol} ${bgAccent}`}>
-                      <div className="text-[10px] text-neutral-400 font-mono">
-                        PYTHON: {pytestCode.split("\n").length} Lines • {pytestCode.length} Bytes
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => copyToClipboard(pytestCode, "consolidatedCode")}
-                          className={`px-3 py-1.5 border ${borderCol} hover:bg-neutral-800/10 rounded-lg text-[11px] font-mono font-semibold transition flex items-center gap-1.5`}
-                        >
-                          {copiedStates["consolidatedCode"] ? (
-                            <>
-                              <Check className="h-3.5 w-3.5 text-emerald-500" />
-                              Copied!
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="h-3 w-3" />
-                              Copy
-                            </>
-                          )}
-                        </button>
-                        <button
-                          onClick={handleDownloadSingle}
-                          className={`px-3 py-1.5 border ${borderCol} hover:bg-neutral-800/10 rounded-lg text-[11px] font-mono font-semibold transition flex items-center gap-1.5`}
-                        >
-                          <Download className="h-3 w-3" />
-                          Download Single
-                        </button>
-                        <button
-                          onClick={handleDownloadZip}
-                          className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-[11px] font-mono font-bold text-white transition flex items-center gap-1.5 shadow-sm"
-                        >
-                          <Download className="h-3 w-3" />
-                          Download Suite (ZIP)
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* IDE look view with sidebar file hierarchy */}
-                    <div className={`border ${isDarkMode ? "border-neutral-700/80 bg-[#121314]" : "border-neutral-300 bg-neutral-50"} rounded-xl overflow-hidden flex shadow-lg`}>
-                      {/* Tiny Sidebar simulating folder layouts */}
-                      <div className={`hidden sm:flex flex-col w-[170px] ${isDarkMode ? "bg-[#1a1b1d] border-r border-[#2d2e30]/40 text-[#9da5b4]" : "bg-neutral-100 border-r border-neutral-200 text-neutral-600"} shrink-0 font-mono text-[10px] p-3 text-left`}>
-                        <div className={`text-[9px] uppercase tracking-wider ${isDarkMode ? "text-neutral-500" : "text-neutral-400"} font-bold mb-3.5`}>EXPLORER</div>
-                        <div className="flex flex-col gap-2">
-                          <div className={`font-medium flex items-center gap-1 ${isDarkMode ? "text-white" : "text-neutral-800"}`}>
-                            <span className="text-amber-500 text-[8px]">▼</span> pytest_suite/
-                          </div>
-                          <button className={`pl-4 ${isDarkMode ? "text-emerald-400" : "text-emerald-600"} font-bold flex items-center gap-1.5 border-l ${isDarkMode ? "border-neutral-700" : "border-neutral-300"} ml-1.5 text-left py-0.5`}>
-                            <FileCode className={`h-3.5 w-3.5 ${isDarkMode ? "text-emerald-400" : "text-emerald-600"}`} />
-                            test_all_apis.py
-                          </button>
-                          {modularFiles.map((file, i) => (
-                            <button
-                              key={i}
-                              onClick={() => { setActiveTab("modular"); setSelectedFileIndex(i); }}
-                              className={`pl-4 flex items-center gap-1.5 border-l ${isDarkMode ? "border-neutral-700/30 hover:border-neutral-500 hover:text-white text-[#9da5b4]" : "border-neutral-200 hover:border-neutral-400 hover:text-neutral-900 text-neutral-500"} ml-1.5 text-left py-0.5`}
-                            >
-                              <FileCode className="h-3.5 w-3.5 text-neutral-400" />
-                              {file.filename}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* True code viewer body */}
-                      <div className="flex-1 flex flex-col min-w-0">
-                        <div className={`${isDarkMode ? "bg-[#18191b] border-b border-[#2d2e30]/30 text-neutral-400" : "bg-neutral-100/60 border-b border-neutral-200 text-neutral-600"} py-2 px-4 flex justify-between items-center text-[9px] font-mono`}>
-                          <span className="flex items-center gap-2">
-                            <span className={`w-1.5 h-1.5 rounded-full ${isDarkMode ? "bg-emerald-500" : "bg-emerald-600"}`}></span>
-                            test_all_apis.py (Generated Python Pytest Layout)
-                          </span>
-                          <span>Python3 / UTF-8</span>
-                        </div>
-                        <div className="overflow-x-auto max-h-[340px] overflow-y-auto">
-                          <table className="w-full border-collapse">
-                            <tbody>
-                              {pytestCode.split("\n").map((line, index) => (
-                                <tr key={index} className={`font-mono text-[11px] leading-normal ${isDarkMode ? "hover:bg-neutral-800/10" : "hover:bg-neutral-250/20"}`}>
-                                  <td className={`w-9 pr-3 text-right select-none ${isDarkMode ? "bg-[#161718] border-[#2d2e30]/30 text-neutral-600" : "bg-neutral-100 border-neutral-200 text-neutral-500"} border-r text-[9px] font-mono text-center`}>
-                                    {index + 1}
-                                  </td>
-                                  <td className={`pl-4 ${isDarkMode ? "text-neutral-200" : "text-neutral-800"} select-all whitespace-pre`}>
-                                    {line || " "}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Assertion mapping explanations to see the mechanics */}
-                    {migrations.length > 0 && (
-                      <div className={`p-4 border ${borderCol} rounded-xl ${bgCard} flex flex-col gap-4 mt-2`}>
-                        <h3 className="text-xs font-mono uppercase tracking-widest text-indigo-550 font-bold flex items-center gap-2">
-                          <ShieldCheck className="h-4.5 w-4.5" />
-                          Assertion Traceability Map
-                        </h3>
-                        <div className="grid grid-cols-1 gap-3.5 max-h-[300px] overflow-y-auto">
-                          {migrations.map((mig, key) => (
-                            <div key={key} className={`border ${borderCol} rounded-lg p-3 ${bgAccent} flex flex-col gap-2.5 text-xs`}>
-                              <div className="flex justify-between items-center px-2 py-1 rounded bg-indigo-500/5 border border-indigo-500/10">
-                                <div className="flex items-center gap-2 font-mono">
-                                  <span className="font-bold text-[11px]">{mig.requestName}</span>
-                                  <span className="px-1 py-0.5 rounded text-[8px] text-white uppercase bg-indigo-600">
-                                    {mig.method}
-                                  </span>
-                                </div>
-                                <span className="text-[10px] font-mono text-neutral-400 truncate max-w-[200px]">{mig.url}</span>
-                              </div>
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                <div className="flex flex-col gap-1">
-                                  <span className={`text-[9px] font-mono ${isDarkMode ? "text-neutral-400" : "text-neutral-550"} uppercase`}>JavaScript Source Assert</span>
-                                  <div className={`p-2 rounded font-mono text-[10px] border ${
-                                    isDarkMode 
-                                      ? "bg-neutral-900 text-neutral-400 border-neutral-800" 
-                                      : "bg-neutral-50 text-neutral-700 border-neutral-200"
-                                  }`}>
-                                    {mig.originalAssertions.map((as, i) => (
-                                      <div key={i} className="truncate select-all">{as}</div>
-                                    ))}
-                                  </div>
-                                </div>
-                                <div className="flex flex-col gap-1">
-                                  <span className="text-[9px] font-mono text-indigo-500 uppercase font-bold">Generated Pytest Assert</span>
-                                  <div className={`p-2 rounded font-mono text-[10px] border ${
-                                    isDarkMode 
-                                      ? "bg-neutral-900 border-neutral-800" 
-                                      : "bg-emerald-50/50 border-emerald-100"
-                                  }`}>
-                                    {mig.migratedAssertions.map((as, i) => (
-                                      <div key={i} className={`truncate select-all font-semibold font-mono text-[10px] ${isDarkMode ? "text-emerald-400" : "text-emerald-700"}`}>{as}</div>
-                                    ))}
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* TAB AREA 2: MODULAR FILES GRID LAYOUT */}
-            {activeTab === "modular" && (
-              <div className="flex flex-col gap-5">
-                {!pytestCode || modularFiles.length === 0 ? (
-                  <div className={`rounded-xl border ${borderCol} ${bgAccent} p-12 text-center flex flex-col items-center justify-center gap-4`}>
-                    <div className="p-3 bg-indigo-500/10 rounded-full text-indigo-500 border border-indigo-500/20">
-                      <Layers className="h-6 w-6" />
-                    </div>
-                    <div>
-                      <h3 className="text-xs font-semibold">No Modular Distribution Configured</h3>
-                      <p className="text-[11px] text-neutral-400 max-w-xs mx-auto mt-1 leading-normal">
-                        Generate compile sequences first using the sidebar action triggers.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-4">
-                    <div className={`flex flex-col sm:flex-row justify-between sm:items-center gap-3 bg-[#1d1f23] p-4 rounded-xl border ${borderCol}`}>
-                      <div>
-                        <h3 className="text-xs font-bold font-mono uppercase tracking-wide text-indigo-500">
-                          PRO DISTRIBUTION FILE LIST
-                        </h3>
-                        <p className="text-[11px] text-neutral-400 mt-0.5 leading-tight">
-                          Modular layout including custom conftest environments and categorized request suites.
-                        </p>
-                      </div>
-                      <button
-                        onClick={handleDownloadZip}
-                        className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-mono rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow"
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        Download ZIP
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
+              {/* PAGE 2: PROJECTS VIEW */}
+              {currentPage === "projects" && (
+                <div className="flex-grow flex flex-col gap-4">
+                  {activeCloudProjectId !== null ? (
+                    /* PROJECT OPENED: IDE WORKSPACE WORKFLOW */
+                    <div className="flex-grow flex flex-col gap-6">
                       
-                      {/* directory sidebar */}
-                      <div className={`md:col-span-4 ${isDarkMode ? "bg-neutral-900/40 border-neutral-800" : "bg-neutral-100 border-neutral-200"} rounded-xl border p-2.5 flex flex-col gap-1`}>
-                        <span className={`text-[9px] font-mono uppercase tracking-widest ${isDarkMode ? "text-neutral-500" : "text-neutral-400"} px-2 py-1`}>SUITE SEGMENTS</span>
-                        {modularFiles.map((file, idx) => (
+                      {/* IDE Tab Header Bar */}
+                      <div className={`p-4 rounded-xl border ${borderCol} bg-neutral-900/5 dark:bg-neutral-950/20 flex flex-col md:flex-row justify-between items-start md:items-center gap-4`}>
+                        <div className="flex items-center gap-3">
                           <button
-                            key={idx}
-                            onClick={() => setSelectedFileIndex(idx)}
-                            className={`w-full text-left p-2 rounded font-mono text-[10.5px] transition flex justify-between items-center ${
-                              selectedFileIndex === idx
-                                ? "bg-indigo-500/10 text-indigo-600 font-bold border-l-2 border-indigo-500 pl-1.5"
-                                : `${isDarkMode ? "hover:bg-neutral-800/55 text-neutral-400" : "hover:bg-neutral-200 text-neutral-600"}`
-                            }`}
+                            onClick={() => setActiveCloudProjectId(null)}
+                            className={`p-2 rounded-lg border ${borderCol} ${bgAccent} hover:bg-neutral-800 text-neutral-400 hover:text-white transition`}
+                            title="Back to Projects Directory"
                           >
-                            <span className="truncate">{file.filename}</span>
+                            <ChevronLeft className="h-4 w-4" />
                           </button>
-                        ))}
-                      </div>
-
-                      {/* Integrated file content panel */}
-                      <div className={`md:col-span-8 flex flex-col ${isDarkMode ? "bg-[#121314] border-neutral-800" : "bg-neutral-50 border-neutral-200"} rounded-xl border shadow-sm overflow-hidden text-xs`}>
-                        <div className={`border-b ${isDarkMode ? "bg-neutral-900/60 border-neutral-800 text-neutral-300" : "bg-neutral-100 border-neutral-200 text-neutral-700"} px-4 py-2.5 flex justify-between items-center font-mono`}>
-                          <span className="font-semibold flex items-center gap-2">
-                            <FileCode className="h-3.5 w-3.5 text-indigo-500" />
-                            {modularFiles[selectedFileIndex]?.filename || "conftest.py"}
-                          </span>
-                          <button
-                            onClick={() => copyToClipboard(modularFiles[selectedFileIndex]?.content, `mod_${selectedFileIndex}`)}
-                            className={`px-2 py-0.5 border rounded text-[9px] font-mono font-bold ${
-                              isDarkMode 
-                                ? "border-neutral-800 bg-neutral-950 text-neutral-400 hover:text-white" 
-                                : "border-neutral-300 bg-white text-neutral-600 hover:text-neutral-950"
-                            }`}
-                          >
-                            {copiedStates[`mod_${selectedFileIndex}`] ? "Copied" : "Copy Source"}
-                          </button>
-                        </div>
-                        <pre className={`p-4 text-[11px] leading-relaxed font-mono ${isDarkMode ? "text-neutral-300 bg-neutral-950" : "text-neutral-800 bg-white"} max-h-80 overflow-y-auto overflow-x-auto select-all`}>
-                          <code>{modularFiles[selectedFileIndex]?.content || ""}</code>
-                        </pre>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* TAB AREA 3: LIVE RE-EXECUTION CONSOLE */}
-            {activeTab === "run" && (
-              <div className="flex flex-col gap-5">
-                {!pytestCode ? (
-                  <div className={`rounded-2xl border ${borderCol} ${bgAccent} p-12 text-center flex flex-col items-center justify-center gap-4`}>
-                    <div className="p-3 bg-indigo-500/10 rounded-full text-indigo-500 border border-indigo-500/20">
-                      <Terminal className="h-6 w-6" />
-                    </div>
-                    <div>
-                      <h3 className="text-xs font-semibold">Test Runner Unconfigured</h3>
-                      <p className="text-[11px] text-neutral-500 max-w-xs mx-auto mt-1 leading-normal">
-                        Please compile the Postman specifications to Pytest first to unleash live re-run mock evaluations.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-4">
-                    
-                    {/* Select Execution health profile */}
-                    <div className={`p-4 border ${borderCol} rounded-xl ${bgAccent} flex flex-col gap-4`}>
-                      <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-mono text-indigo-500 uppercase font-bold">PANE 3 • TARGET VM SIMULATOR</span>
-                        <div className="flex items-center gap-1.5 text-[10px] font-mono text-neutral-400">
-                          <Server className="h-3.5 w-3.5" />
-                          Status: Active Sandbox
-                        </div>
-                      </div>
-
-                      <div className={`flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 ${isDarkMode ? "bg-[#0d0d10] border-neutral-800" : "bg-neutral-50 border-neutral-200"} p-3 rounded-lg border`}>
-                        <div className="max-w-md text-xs leading-normal">
-                          <span className="text-[10px] font-mono font-bold text-indigo-550 block uppercase">Network drift simulator settings</span>
-                          <p className={`${isDarkMode ? "text-neutral-400" : "text-neutral-600"} text-[11px] shrink font-light mt-0.5`}>
-                            Synthesize simulated response values payload mismatches, expired tokens 401 drift, and bad socket 503 errors to see how failures report.
-                          </p>
-                        </div>
-                        
-                        <select
-                          value={simulationMode}
-                          onChange={(e) => setSimulationMode(e.target.value as any)}
-                          className={`py-1.5 px-3 border rounded-md text-xs focus:ring-1 focus:ring-indigo-500 font-mono ${selectStyle}`}
-                        >
-                          <option value="success">Normal Run (100% Passed)</option>
-                          <option value="offline">Server Offline (503 Service Temp Error)</option>
-                          <option value="drift_auth">Token Expired (401 Bad Credentials)</option>
-                          <option value="drift_schema">Contract Mismatch (Chai Fail Assert)</option>
-                        </select>
-                      </div>
-
-                      <button
-                        onClick={handleExecuteTests}
-                        disabled={isExecuting}
-                        className={`w-full py-2.5 ${isDarkMode ? "bg-neutral-900 border-neutral-800 text-white" : "bg-neutral-100 border-neutral-300 text-neutral-800"} hover:bg-indigo-600 hover:text-white hover:border-indigo-600 rounded-xl font-mono font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition`}
-                      >
-                        {isExecuting ? (
-                          <>
-                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                            Executing virtual testing suite on backend pipeline...
-                          </>
-                        ) : (
-                          <>
-                            <Play className="h-3.5 w-3.5 text-emerald-400 fill-emerald-400/20" />
-                            Run pytest automated suite
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                    {/* EXECUTION RESULTS COMPONENT */}
-                    {execResult && (
-                      <div className="flex flex-col gap-4">
-                        
-                        {/* Metric Dashboard */}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                          <div className={`p-3 text-center border ${borderCol} rounded-lg ${bgCard}`}>
-                            <span className="text-[9px] font-mono text-neutral-400 uppercase tracking-widest block">Core target tests</span>
-                            <p className={`text-xl font-display font-semibold ${textTitle} mt-0.5`}>{execResult.total}</p>
-                          </div>
-                          <div className={`p-3 text-center border ${borderCol} rounded-lg ${bgCard}`}>
-                            <span className="text-[9px] font-mono text-emerald-500 uppercase tracking-widest font-bold block">checks passed</span>
-                            <p className="text-xl font-display font-semibold text-emerald-500 mt-0.5">{execResult.passed}</p>
-                          </div>
-                          <div className={`p-3 text-center border ${borderCol} rounded-lg ${bgCard}`}>
-                            <span className="text-[9px] font-mono text-rose-500 uppercase tracking-widest font-bold block">failed metrics</span>
-                            <p className={`text-xl font-display font-semibold mt-0.5 ${execResult.failed > 0 ? "text-rose-500 animate-pulse" : textTitle}`}>{execResult.failed}</p>
-                          </div>
-                          <div className={`p-3 text-center border ${borderCol} rounded-lg ${bgCard}`}>
-                            <span className="text-[9px] font-mono text-neutral-400 uppercase tracking-widest block">execution duration</span>
-                            <p className={`text-xl font-display font-semibold ${textTitle} mt-0.5`}>{execResult.execution_time.toFixed(2)}s</p>
+                          <div className="text-left">
+                            <span className="text-[9px] font-mono tracking-widest text-indigo-500 font-bold uppercase block">Active Target Namespace</span>
+                            <h3 className={`text-sm font-bold ${textTitle} flex items-center gap-1.5 mt-0.5`}>
+                              <Folder className="h-4.5 w-4.5 text-indigo-505 fill-indigo-500/10" />
+                              {collectionName || "Active Transpiler Workspace"}
+                            </h3>
                           </div>
                         </div>
 
-                        {/* Black Terminal Output Logs */}
-                        <div className={`${isDarkMode ? "bg-[#121314] border-neutral-800" : "bg-neutral-100 border-neutral-200"} rounded-xl border p-4 flex flex-col overflow-hidden shadow`}>
-                          <div className={`flex justify-between items-center text-[10px] ${isDarkMode ? "text-neutral-500 border-neutral-800/80" : "text-neutral-600 border-neutral-250"} pb-2 mt-0.5 border-b mb-3`}>
-                            <span className={`flex items-center gap-1.5 uppercase font-bold tracking-wider ${isDarkMode ? "text-neutral-300" : "text-neutral-800"}`}>
-                              <Terminal className="h-4 w-4 text-emerald-500" />
-                              Pytest terminal trace logs
-                            </span>
+                        {/* IDE Tabs Selectors */}
+                        <div className="flex rounded-lg bg-neutral-950/60 p-1 border border-neutral-800 w-full md:w-auto overflow-x-auto gap-0.5 font-mono">
+                          {[
+                            { key: "collection", id: "collection", label: "Collection Setup", icon: UploadCloud },
+                            { key: "pytest", id: "pytest", label: "Generated Pytest", icon: Code },
+                            { key: "execution", id: "execution", label: "Execution Results", icon: Play },
+                            { key: "ai", id: "ai", label: "AI Analysis & Chat", icon: Sparkles },
+                            { key: "downloads", id: "downloads", label: "Downloads Center", icon: Download }
+                          ].map((t) => (
                             <button
-                              onClick={() => copyToClipboard(execResult.output_log, "pytestTerminal")}
-                              className={`text-[9px] px-2 py-0.5 rounded font-mono font-bold ${
-                                isDarkMode 
-                                  ? "text-indigo-500 bg-[#1a1b1d] border-neutral-700/60 hover:text-white" 
-                                  : "text-white bg-indigo-600 hover:bg-indigo-700"
+                              key={t.id}
+                              onClick={() => setProjectTab(t.key as any)}
+                              className={`px-3 py-1.5 rounded-md text-[10.5px] transition font-bold cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                                projectTab === t.key
+                                  ? "bg-indigo-600 text-white shadow-sm"
+                                  : "text-neutral-400 hover:text-neutral-205"
                               }`}
                             >
-                              {copiedStates["pytestTerminal"] ? "Copied" : "Copy terminal logs"}
+                              <t.icon className="h-3.5 w-3.5" />
+                              {t.label}
                             </button>
-                          </div>
-                          <pre className={`font-mono text-[10px] leading-relaxed overflow-x-auto max-h-48 whitespace-pre select-all p-3.5 rounded-lg border ${
-                            isDarkMode 
-                              ? "text-[#c9d1d9] bg-neutral-950 border-neutral-800" 
-                              : "text-neutral-800 bg-white border-neutral-200"
-                          }`}>
-                            <code>{execResult.output_log}</code>
-                          </pre>
+                          ))}
                         </div>
+                      </div>
 
-                        {/* AUTOMATED DIAGNOSTIC LOGS REPORT SECTION */}
-                        {execResult.failures.length > 0 && (
-                          <div className={`p-4 border ${borderCol} rounded-xl ${bgCard} flex flex-col gap-4`}>
-                            <div className="flex items-start gap-2.5">
-                              <div className="p-1.5 bg-rose-500/10 rounded-lg text-rose-500 border border-rose-500/25 shrink-0">
-                                <AlertTriangle className="h-4 w-4" />
+                      {/* Render appropriate IDE Panel Depending on selected tab */}
+                      <div className="flex-grow">
+                        {projectTab === "collection" && (
+                          <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
+                            {/* Library & Config column */}
+                            <div className="xl:col-span-4 flex flex-col gap-4">
+                              <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} space-y-4`}>
+                                <div className="text-left">
+                                  <span className="text-[9px] font-mono text-indigo-400 font-bold block uppercase tracking-widest">Compiler Targets</span>
+                                  <h3 className={`text-xs font-bold font-sans ${textTitle} mt-0.5`}>Framework Profile</h3>
+                                </div>
+                                <div className="font-mono text-xs space-y-3">
+                                  <div className="flex flex-col gap-1 text-left">
+                                    <label className="text-[9px] uppercase tracking-wider text-neutral-400 font-bold">Python Target Library</label>
+                                    <select
+                                      value={library}
+                                      onChange={(e) => setLibrary(e.target.value as any)}
+                                      className={`py-1 px-2 border rounded font-mono text-xs ${selectStyle}`}
+                                    >
+                                      <option value="requests">requests (Standard sync)</option>
+                                      <option value="httpx">httpx (Modern synchronous)</option>
+                                      <option value="async_httpx">async_httpx (High velocity async)</option>
+                                    </select>
+                                  </div>
+
+                                  <div className="flex flex-col gap-1 text-left">
+                                    <label className="text-[9px] uppercase tracking-wider text-neutral-400 font-bold">Base URL Environment Token</label>
+                                    <input
+                                      type="text"
+                                      value={baseUrlEnv}
+                                      onChange={(e) => setBaseUrlEnv(e.target.value)}
+                                      placeholder="e.g. {{baseUrl}}"
+                                      className={`py-1.5 px-2 bg-black/40 border ${borderCol} rounded placeholder:text-neutral-700 text-xs`}
+                                    />
+                                  </div>
+
+                                  <div className="flex items-center justify-between border-t border-neutral-800/40 pt-2.5 mt-2.5">
+                                    <span className="text-[10px] text-neutral-405 font-bold">Inject Pytest Fixture URL</span>
+                                    <input
+                                      type="checkbox"
+                                      checked={injectBaseUrlFixture}
+                                      onChange={(e) => setInjectBaseUrlFixture(e.target.checked)}
+                                      className="rounded text-indigo-505 bg-neutral-900 border-neutral-800"
+                                    />
+                                  </div>
+
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[10px] text-neutral-405 font-bold">Generate AST Code Comments</span>
+                                    <input
+                                      type="checkbox"
+                                      checked={addComments}
+                                      onChange={(e) => setAddComments(e.target.checked)}
+                                      className="rounded text-indigo-505 bg-neutral-900 border-neutral-800"
+                                    />
+                                  </div>
+                                </div>
                               </div>
-                              <div>
-                                <span className="text-[9px] font-mono uppercase font-bold text-neutral-400 tracking-wider">MIGRATOR AGENT BOT</span>
-                                <h3 className="text-xs font-bold font-display text-rose-500 uppercase tracking-tight">Isolated anomalous diagnostic fault report</h3>
-                              </div>
+
+                              <button
+                                onClick={handleMigrate}
+                                disabled={isMigrating || collectionItems.length === 0}
+                                className="w-full bg-indigo-600 hover:bg-indigo-700 py-2.5 rounded-xl text-xs font-mono font-bold uppercase text-white shadow-md transition flex items-center justify-center gap-2 cursor-pointer"
+                              >
+                                {isMigrating ? (
+                                  <>
+                                    <RefreshCw className="h-3.5 w-3.5 animate-spin text-white" />
+                                    <span>Compiler Transpiling...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Code className="h-3.5 w-3.5" />
+                                    <span>Compile Pytest Suite</span>
+                                  </>
+                                )}
+                              </button>
                             </div>
 
-                            <div className="flex flex-col gap-4 divide-y divide-neutral-800/20 max-h-[300px] overflow-y-auto pr-1">
-                              {execResult.failures.map((fail, index) => (
-                                <div key={index} className="pt-3.5 first:pt-0 flex flex-col gap-2.5 text-xs">
-                                  <div className="font-mono font-bold flex items-center gap-1 text-xs">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0"></span>
-                                    <span>Failed step:</span>
-                                    <span className={`${isDarkMode ? "bg-neutral-800 border-neutral-700 text-neutral-300" : "bg-neutral-100 border-neutral-200 text-neutral-750"} px-1.5 py-0.5 rounded text-[10px] font-mono font-normal`}>{fail.test_name}</span>
-                                  </div>
+                            {/* Collections import and Endpoint registry tree map columns */}
+                            <div className="xl:col-span-8">
+                              <CollectionsPanel
+                                isDarkMode={isDarkMode}
+                                borderCol={borderCol}
+                                bgAccent={bgAccent}
+                                textTitle={textTitle}
+                                textMuted={textMuted}
+                                collectionSource={collectionSource}
+                                setCollectionSource={setCollectionSource}
+                                dragOver={dragOver}
+                                handleDragOver={handleDragOver}
+                                handleDragLeave={handleDragLeave}
+                                handleDrop={handleDrop}
+                                handleFileChange={handleFileChange}
+                                fileInputRef={fileInputRef}
+                                postmanApiKey={postmanApiKey}
+                                setPostmanApiKey={setPostmanApiKey}
+                                isPostmanKeyLoading={isPostmanKeyLoading}
+                                handleConnectPostman={handleConnectPostman}
+                                workspaces={workspaces}
+                                selectedWorkspace={selectedWorkspace}
+                                handleWorkspaceChange={handleWorkspaceChange}
+                                collections={collections}
+                                searchQuery={searchQuery}
+                                setSearchQuery={setSearchQuery}
+                                isCollectionsLoading={isCollectionsLoading}
+                                selectedCollectionUid={selectedCollectionUid}
+                                handleSelectPostmanCollection={handleSelectPostmanCollection}
+                                sampleCollections={sampleCollections}
+                                handleSelectSample={handleSelectSample}
+                                collectionItems={collectionItems}
+                                selectedRequestIndex={selectedRequestIndex}
+                                setSelectedRequestIndex={setSelectedRequestIndex}
+                                reqActiveTab={reqActiveTab}
+                                setReqActiveTab={setReqActiveTab}
+                                HighlightJsExpression={HighlightJsExpression}
+                                handleMigrate={handleMigrate}
+                                isMigrating={isMigrating}
+                              />
+                            </div>
+                          </div>
+                        )}
 
-                                  <div className="p-2.5 bg-rose-950/20 rounded-md font-mono text-[9px] leading-relaxed border border-rose-900/40 text-rose-400">
-                                    {fail.error_message}
-                                  </div>
+                        {projectTab === "pytest" && (
+                          <div className="space-y-6">
+                            {/* Layout selection: Consolidated vs Modular */}
+                            <div className="flex border-b border-neutral-800/40 pb-1.5 text-xs font-mono gap-5">
+                              {["consolidated", "modular"].map((subT) => (
+                                <button
+                                  key={subT}
+                                  onClick={() => setActiveTab(subT as any)}
+                                  className={`py-1 px-1 border-b-2 uppercase font-mono font-bold transition focus:outline-none cursor-pointer ${
+                                    activeTab === subT
+                                      ? "border-indigo-500 text-indigo-400"
+                                      : "border-transparent text-neutral-400 hover:text-neutral-200"
+                                  }`}
+                                >
+                                  {subT === "consolidated" ? "test_all_apis.py (Consolidated)" : "Modular Workspace Distribution"}
+                                </button>
+                              ))}
+                            </div>
 
-                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 leading-relaxed text-[11px] font-light">
-                                    <div className={`${isDarkMode ? "bg-neutral-900/35 border-neutral-800" : "bg-neutral-100/50 border-neutral-200"} p-2 rounded-lg border flex flex-col`}>
-                                      <span className="font-mono font-semibold text-[9px] text-indigo-500 uppercase tracking-wider">PROBABLE ROOT CAUSE</span>
-                                      <p className={`mt-1 font-light leading-relaxed ${isDarkMode ? "text-neutral-300" : "text-neutral-700"}`}>{fail.probable_cause}</p>
+                            {activeTab === "consolidated" ? (
+                              <div className="space-y-4">
+                                <PytestConsolidatedPanel
+                                  isDarkMode={isDarkMode}
+                                  borderCol={borderCol}
+                                  bgAccent={bgAccent}
+                                  textTitle={textTitle}
+                                  pytestCode={pytestCode}
+                                  migrations={[]}
+                                  copyToClipboard={copyToClipboard}
+                                  copiedStates={copiedStates}
+                                  handleDownloadSingle={handleDownloadSingle}
+                                  bgCard={bgCard}
+                                />
+                                
+                                {aiPromptMeta && (
+                                  <div className={`${isDarkMode ? "bg-[#121314] text-[#a9b2c3] border-neutral-800" : "bg-neutral-100 text-neutral-600 border-neutral-200"} rounded-xl p-4 text-[10px] leading-relaxed font-mono border mt-1 text-left`}>
+                                    <div className={`font-bold uppercase ${isDarkMode ? "text-neutral-100" : "text-neutral-800"} tracking-wider mb-2 flex items-center gap-2`}>
+                                      <Activity className="h-4 w-4 text-emerald-500 animate-pulse" />
+                                      AST Conversion Telemetry logs
                                     </div>
-                                    <div className="bg-indigo-500/5 p-2 rounded-lg border border-indigo-500/15 flex flex-col">
-                                      <span className="font-mono font-bold text-[9px] text-indigo-500 uppercase tracking-wider">SUGGESTED CORRECTION ACTION</span>
-                                      <p className="mt-1 font-medium leading-relaxed">{fail.recommendations}</p>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 border-b border-neutral-800 pb-2.5 mb-2.5 text-neutral-400">
+                                      <div>LLM Engine: <span className={isDarkMode ? "text-neutral-300" : "text-neutral-700"}>gemini-2.5-flash-pro</span></div>
+                                      <div>Timestamp: <span className={isDarkMode ? "text-neutral-300" : "text-neutral-700"}>{aiPromptMeta.timestamp}</span></div>
                                     </div>
-                                  </div>
-
-                                  {fail.code_patch && (
-                                    <div className={`${isDarkMode ? "bg-neutral-950 border-neutral-800" : "bg-white border-neutral-200"} rounded-lg p-3 border text-[10px] font-mono flex flex-col`}>
-                                      <div className={`flex justify-between items-center text-[8px] ${isDarkMode ? "text-neutral-500 border-neutral-900" : "text-neutral-400 border-neutral-200"} uppercase tracking-widest pb-1.5 mb-2 border-b`}>
-                                        <span>Correction mapping snippet</span>
-                                        <button
-                                          onClick={() => copyToClipboard(fail.code_patch, `patch_${index}`)}
-                                          className={`font-semibold ${isDarkMode ? "text-neutral-400 hover:text-white" : "text-neutral-600 hover:text-neutral-950"}`}
-                                        >
-                                          {copiedStates[`patch_${index}`] ? "Copied" : "Copy replacement"}
-                                        </button>
-                                      </div>
-                                      <pre className={`leading-normal max-h-24 overflow-y-auto whitespace-pre ${isDarkMode ? "text-neutral-300" : "text-neutral-800"}`}>
-                                        <code>{fail.code_patch}</code>
+                                    <details className="cursor-pointer">
+                                      <summary className="text-indigo-400 font-semibold hover:underline text-left">View Mapping directives</summary>
+                                      <pre className={`mt-2 text-[9px] p-2 rounded max-h-24 overflow-y-auto border whitespace-pre-wrap text-left ${isDarkMode ? "bg-neutral-950 text-neutral-400 border-neutral-900" : "bg-white text-neutral-600"}`}>
+                                        {aiPromptMeta.systemInstruction}
                                       </pre>
+                                    </details>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <PytestModularPanel
+                                borderCol={borderCol}
+                                bgAccent={bgAccent}
+                                textTitle={textTitle}
+                                modularFiles={modularFiles}
+                                selectedFileIndex={selectedFileIndex}
+                                setSelectedFileIndex={setSelectedFileIndex}
+                                copyToClipboard={copyToClipboard}
+                                copiedStates={copiedStates}
+                                handleDownloadZip={handleDownloadZip}
+                                isDarkMode={isDarkMode}
+                              />
+                            )}
+                          </div>
+                        )}
+
+                        {projectTab === "execution" && (
+                          <VMRunnerPanel
+                            borderCol={borderCol}
+                            bgAccent={bgAccent}
+                            textTitle={textTitle}
+                            simulationMode={simulationMode}
+                            setSimulationMode={setSimulationMode}
+                            handleExecuteTests={handleExecuteTests}
+                            isExecuting={isExecuting}
+                            execResult={execResult}
+                            copiedStates={copiedStates}
+                            copyToClipboard={copyToClipboard}
+                            isDarkMode={isDarkMode}
+                          />
+                        )}
+
+                        {projectTab === "ai" && (
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pb-10 items-start">
+                            {/* Card A: Failure Diagnosis */}
+                            <div className={`p-5 rounded-xl border ${borderCol} ${bgAccent} flex flex-col min-h-[480px] text-left`}>
+                              <div className="pb-3 border-b border-neutral-800 flex items-center justify-between mb-4">
+                                <div className="text-left animate-fadeIn">
+                                  <span className="text-[8px] font-mono text-indigo-400 font-bold block uppercase tracking-widest">Failure Diagnostics Engine</span>
+                                  <h3 className={`text-xs md:text-sm font-bold font-sans ${textTitle} mt-0.5`}>AI Failure Diagnostics & Remediation</h3>
+                                </div>
+                                <span className="px-2 py-0.5 text-[9px] font-mono bg-emerald-500/10 text-emerald-400 rounded-md font-bold uppercase shrink-0">
+                                  Active Analysis
+                                </span>
+                              </div>
+
+                              <div className="space-y-4 flex-grow flex flex-col justify-between">
+                                <div className="space-y-3">
+                                  <p className="text-[11px] text-neutral-400 leading-normal">
+                                    Analyze active assertion failures and payload mismatch errors identified in the last Pytest VM execution.
+                                  </p>
+
+                                  <div className="p-3 bg-neutral-950/60 rounded border border-neutral-800 text-[10.5px] font-mono text-neutral-400 select-text">
+                                    <div className="text-[8px] font-bold text-neutral-500 uppercase tracking-wider mb-1">Active VM Trace:</div>
+                                    {execResult && execResult.failed > 0 ? (
+                                      <div className="text-rose-400 leading-relaxed">
+                                        ❌ Found {execResult.failed} failed assertions in the environment trial trace.
+                                      </div>
+                                    ) : (
+                                      <div className="text-emerald-400 leading-relaxed">
+                                        ✓ Last execution results was 100% compliant. No errors found.
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {aiDiagnosticResult ? (
+                                    <div className="p-3.5 bg-neutral-950 border border-neutral-800 rounded-lg max-h-64 overflow-y-auto text-[11px]/relaxed leading-relaxed font-sans text-neutral-300 select-text whitespace-pre-wrap">
+                                      {aiDiagnosticResult}
+                                    </div>
+                                  ) : (
+                                    <div className="h-44 flex flex-col items-center justify-center p-4 border border-dashed border-neutral-800 rounded-lg text-center text-neutral-500 gap-1.5 font-mono text-[10px]">
+                                      <Terminal className="h-6 w-6 text-neutral-700" />
+                                      <span>Click button to initiate AI diagnostics analyzer...</span>
                                     </div>
                                   )}
                                 </div>
-                              ))}
+
+                                <div className="pt-2">
+                                  <button
+                                    onClick={handleRunFailureDiagnostic}
+                                    disabled={aiDiagnosticIsLoading || !execResult || execResult.failed === 0}
+                                    className={`w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-neutral-800 disabled:text-neutral-500 text-white font-mono font-bold rounded-lg text-xs uppercase cursor-pointer flex items-center justify-center gap-2`}
+                                  >
+                                    {aiDiagnosticIsLoading ? (
+                                      <>
+                                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                        <span>Running Diagnostic Model...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Sparkles className="h-3.5 w-3.5" />
+                                        <span>Diagnose Trial Faults</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Card B: AST Code Explainer */}
+                            <div className={`p-5 rounded-xl border ${borderCol} ${bgAccent} flex flex-col min-h-[480px] text-left`}>
+                              <div className="pb-3 border-b border-neutral-800 flex items-center justify-between mb-4">
+                                <div className="text-left animate-fadeIn">
+                                  <span className="text-[8px] font-mono text-indigo-400 font-bold block uppercase tracking-widest">AST Compiler Insights</span>
+                                  <h3 className={`text-xs md:text-sm font-bold font-sans ${textTitle} mt-0.5`}>AST Code Parser & Explainer</h3>
+                                </div>
+                                <span className="px-2 py-0.5 text-[9px] font-mono bg-[#6366f1]/10 text-indigo-400 rounded-md font-bold uppercase shrink-0">
+                                  Code Parser
+                                </span>
+                              </div>
+
+                              <div className="space-y-4 flex-grow flex flex-col justify-between">
+                                <div className="space-y-3">
+                                  <p className="text-[11px] text-neutral-400 leading-normal">
+                                    Generates block-by-block structural explanations for transpiled assertions, system fixture environments, and client mappings inside <strong className="text-neutral-200">test_all_apis.py</strong>.
+                                  </p>
+
+                                  <div className="p-3 bg-neutral-950/60 rounded border border-neutral-800 text-[10.5px] font-mono text-neutral-400 select-text">
+                                    <div className="text-[8px] font-bold text-neutral-500 uppercase tracking-wider mb-1">Target Module Codebase:</div>
+                                    {pytestCode ? (
+                                      <div className="text-[#a5b4fc] truncate">
+                                        ✓ Loaded test_all_apis.py ({pytestCode.split("\n").length} statements compiled)
+                                      </div>
+                                    ) : (
+                                      <div className="text-amber-500">
+                                        ⚠ No python test code compiled. Convert collection first.
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {aiExplanationResult ? (
+                                    <div className="p-3.5 bg-neutral-950 border border-neutral-800 rounded-lg max-h-64 overflow-y-auto text-[11px]/relaxed leading-relaxed font-sans text-neutral-300 select-text whitespace-pre-wrap">
+                                      {aiExplanationResult}
+                                    </div>
+                                  ) : (
+                                    <div className="h-44 flex flex-col items-center justify-center p-4 border border-dashed border-neutral-800 rounded-lg text-center text-neutral-500 gap-1.5 font-mono text-[10px]">
+                                      <Terminal className="h-6 w-6 text-neutral-700" />
+                                      <span>Click button to initiate AST code structure explainer...</span>
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="pt-2">
+                                  <button
+                                    onClick={handleExplainPytestCode}
+                                    disabled={aiExplanationIsLoading || !pytestCode}
+                                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-neutral-800 disabled:text-neutral-500 text-white font-mono font-bold rounded-lg text-xs uppercase cursor-pointer flex items-center justify-center gap-2"
+                                  >
+                                    {aiExplanationIsLoading ? (
+                                      <>
+                                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                        <span>Parsing compiled Abstract Syntax Trees...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Sparkles className="h-3.5 w-3.5" />
+                                        <span>Explain Compiled Pytest Code</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           </div>
                         )}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
 
-            {/* TAB AREA 4: MODEL CONTEXT PROTOCOL (MCP) INTERACTIVE SANDBOX HUB */}
-            {activeTab === "mcp" && (
-              <div className="flex flex-col gap-6 animate-fadeIn pb-6">
-                
-                {/* Protocol Health Card */}
-                <div className={`p-4 md:p-5 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-sm pb-5`}>
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-500 animate-pulse">
-                      <Server className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className={`text-xs font-bold font-mono uppercase tracking-wider ${isDarkMode ? "text-neutral-100" : "text-neutral-900"}`}>
-                          Model Context Protocol Server
-                        </h3>
-                        <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 tracking-wider font-mono">
-                          ● LIVE
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-neutral-500 font-mono mt-0.5 select-all">
-                        Active Ingress: http://localhost:3000/api/mcp (JSON-RPC 2.0 Web Protocol)
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <button
-                      onClick={() => { fetchMcpTools(); fetchMcpLogs(); }}
-                      className={`py-1.5 px-3 rounded-lg border ${borderCol} text-[10px] font-mono hover:bg-neutral-500/5 transition flex items-center gap-1.5 font-bold uppercase cursor-pointer`}
-                    >
-                      <RefreshCw className="h-3.5 w-3.5 text-indigo-500" />
-                      Sync Registry
-                    </button>
-                    <a
-                      href="/api/mcp/tools"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={`py-1.5 px-3 rounded-lg border ${borderCol} text-[10px] font-mono hover:bg-neutral-500/5 transition flex items-center gap-1.5 font-bold uppercase`}
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      View JSON Schema
-                    </a>
-                  </div>
-                </div>
-
-                {/* Main Two-Column Panel Splitter */}
-                <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-                  
-                  {/* Left Column: Registered Tools & Raw Sandbox (xl:col-span-7) */}
-                  <div className="xl:col-span-7 flex flex-col gap-6">
-                    
-                    <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
-                      <div>
-                        <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-indigo-500 flex items-center gap-2">
-                          <Cpu className="h-4.5 w-4.5" />
-                          MCP Server Tools Dashboard
-                        </h4>
-                        <p className="text-[11px] text-neutral-400 mt-1 leading-normal font-light">
-                          These tools are automatically registered with the protocol server and are fully discoverable by domestic and external model context protocols.
-                        </p>
-                      </div>
-
-                      {/* Tool Deck Cards */}
-                      <div className="flex flex-col gap-3">
-                        {mcpTools.length === 0 ? (
-                          <div className="text-center py-6 text-xs text-neutral-500 font-mono">No tools registered in schema. Reloading server...</div>
-                        ) : (
-                          mcpTools.map((tool) => (
-                            <div
-                              key={tool.name}
-                              className={`p-3.5 rounded-xl border ${mcpSelectedTool === tool.name ? "border-indigo-500/50 bg-indigo-500/5" : isDarkMode ? "border-neutral-800 bg-neutral-900/10 hover:bg-neutral-900/30" : "border-neutral-200 bg-neutral-50 hover:bg-neutral-100/50"} transition flex flex-col md:flex-row md:items-center justify-between gap-3 cursor-pointer`}
-                              onClick={() => setMcpSelectedTool(tool.name)}
-                            >
-                              <div className="flex-1 min-w-0 font-sans">
-                                <div className="flex items-center gap-2 font-mono">
-                                  <span className={`text-[12px] font-bold ${mcpSelectedTool === tool.name ? "text-indigo-500" : isDarkMode ? "text-white" : "text-neutral-900"}`}>
-                                    {tool.name}
-                                  </span>
-                                  <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-widest ${tool.status === "active" ? "text-emerald-500 bg-emerald-500/10 border border-emerald-500/20" : "text-amber-500 bg-amber-500/10"}`}>
-                                    {tool.status}
-                                  </span>
-                                </div>
-                                <p className={`text-[10px]/relaxed ${isDarkMode ? "text-neutral-400" : "text-neutral-600"} font-light mt-1`}>
-                                  {tool.description}
+                        {projectTab === "downloads" && (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-12">
+                            <div className={`p-5 rounded-xl border ${borderCol} ${bgAccent} flex flex-col justify-between h-44 text-left`}>
+                              <div className="space-y-1.5 flex flex-col text-left">
+                                <FileCode className="h-6 w-6 text-indigo-405" />
+                                <h4 className={`font-bold text-xs ${textTitle} mt-0`}>Consolidated Suite (Single File)</h4>
+                                <p className="text-[10px] text-neutral-500 leading-normal">
+                                  Standard standalone script contains custom request fixtures and parsed assertion calls. Perfect for rapid developer testing.
                                 </p>
-                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[9px] font-mono text-neutral-500">
-                                  <span>Required Keys: <strong className="font-bold">{tool.inputSchema?.required?.join(", ") || "None"}</strong></span>
-                                  <span>•</span>
-                                  <span>Last Run: <strong className="font-bold text-neutral-500">{tool.lastInvocationTime ? new Date(tool.lastInvocationTime).toLocaleTimeString() : "Never"}</strong></span>
-                                </div>
                               </div>
-                              <div className="shrink-0 flex items-center justify-end">
-                                <ChevronRight className={`h-4.5 w-4.5 transition ${mcpSelectedTool === tool.name ? "text-indigo-500 translate-x-1" : "text-neutral-600"}`} />
+                              <button
+                                onClick={handleDownloadSingle}
+                                disabled={!pytestCode}
+                                className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-mono text-xs font-bold rounded-lg transition cursor-pointer"
+                              >
+                                Download test_all_apis.py
+                              </button>
+                            </div>
+
+                            <div className={`p-5 rounded-xl border ${borderCol} ${bgAccent} flex flex-col justify-between h-44 text-left`}>
+                              <div className="space-y-1.5 flex flex-col text-left">
+                                <Layers className="h-6 w-6 text-indigo-405" />
+                                <h4 className={`font-bold text-xs ${textTitle} mt-0`}>Modular Suite (.ZIP Bundle)</h4>
+                                <p className="text-[10px] text-neutral-500 leading-normal">
+                                  An enterprise structure: features separate test files, configured conftest.py, and dynamic requirements registries. Matches standard CI pipelines.
+                                </p>
                               </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Collapsible API Tester Workbench */}
-                    {mcpSelectedTool && (
-                      <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm animate-fadeIn`}>
-                        <div className="flex justify-between items-center border-b border-neutral-800/20 pb-2.5">
-                          <div>
-                            <span className="text-[10px] font-mono text-indigo-500 uppercase font-bold tracking-wider">RAW TOOL WORKBENCH</span>
-                            <h4 className={`text-xs font-bold font-mono text-neutral-300 mt-0.5`}>
-                              RPC Method Call: <span className="text-indigo-500 select-all">{mcpSelectedTool}</span>
-                            </h4>
-                          </div>
-                          <span className="text-[9px] font-mono text-neutral-500 uppercase tracking-widest">JSON-RPC 2.0</span>
-                        </div>
-
-                        {/* Split pane for Raw tool input/output */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          
-                          {/* Input argument editor */}
-                          <div className="flex flex-col gap-1.5 text-xs">
-                            <span className="text-[10px] font-mono text-neutral-400 flex items-center gap-1.5 font-bold uppercase">
-                              <Settings className="h-3.5 w-3.5" />
-                              Call Arguments (JSON)
-                            </span>
-                            <textarea
-                              value={mcpToolArgs}
-                              onChange={(e) => setMcpToolArgs(e.target.value)}
-                              rows={10}
-                              className={`w-full py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-700 bg-black/40 ${isDarkMode ? "bg-[#0d0d10] border-neutral-800 text-neutral-200 focus:border-indigo-500" : "bg-neutral-50 border-neutral-200 text-neutral-900 focus:border-indigo-500"}`}
-                              placeholder="{}"
-                            />
-                            <button
-                              onClick={handleInvokeMcpToolRaw}
-                              disabled={mcpIsCallingTool}
-                              className="mt-1 bg-indigo-600/10 hover:bg-indigo-600/25 text-indigo-500 border border-indigo-500/20 hover:border-indigo-500/50 transition font-mono font-bold py-2 rounded-xl flex items-center justify-center gap-2 text-xs cursor-pointer"
-                            >
-                              {mcpIsCallingTool ? (
-                                <>
-                                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                                  Triggering internal pipeline...
-                                </>
-                              ) : (
-                                <>
-                                  <Send className="h-3.5 w-3.5" />
-                                  Call 'tools/call' RPC
-                                </>
-                              )}
-                            </button>
-                          </div>
-
-                          {/* Raw RPC Console Output */}
-                          <div className="flex flex-col gap-1.5 text-xs">
-                            <span className="text-[10px] font-mono text-neutral-400 flex items-center gap-1.5 font-bold uppercase">
-                              <Terminal className="h-3.5 w-3.5" />
-                              Server JSON-RPC Response JSON
-                            </span>
-                            <div className={`w-full h-[264px] border rounded-xl p-3 font-mono text-[10.5px]/relaxed overflow-auto select-all max-h-72 align-top ${isDarkMode ? "bg-[#09090b] text-[#55ea46] border-neutral-800" : "bg-neutral-50 border-neutral-200 text-neutral-850"}`}>
-                              {mcpRawResponse ? (
-                                <pre className="whitespace-pre">{mcpRawResponse}</pre>
-                              ) : (
-                                <span className="text-neutral-500 text-[10px] italic font-light">// Invoke the RPC method call above to trace structured JSON records here...</span>
-                              )}
-                            </div>
-                          </div>
-
-                        </div>
-                      </div>
-                    )}
-
-                  </div>
-
-                  {/* Right Column: AI Agent Sandbox & Protocol Logs (xl:col-span-5) */}
-                  <div className="xl:col-span-5 flex flex-col gap-6">
-                    
-                    {/* conversational agent client */}
-                    <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
-                      <div>
-                        <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-emerald-500 flex items-center gap-2">
-                          <Sparkles className="h-4.5 w-4.5 animate-pulse text-emerald-500" />
-                          MCP AI Agent Sandbox
-                        </h4>
-                        <p className="text-[11px] text-neutral-400 mt-1 leading-normal font-light font-sans">
-                          Our AI Agent operates autonomously on top of our live environment. Describe what you want, and the agent will dynamically select and invoke the best tool.
-                        </p>
-                      </div>
-
-                      {/* Suggestions list */}
-                      <div className="flex flex-col gap-1.5 border-b border-neutral-800/10 pb-3">
-                        <span className="text-[9px] font-mono text-neutral-500 uppercase font-bold">Suggested Agentic Prompts:</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          <button
-                            onClick={() => handleAgentChatSubmit("Fetch user-api from postman store")}
-                            className={`py-1.5 px-2 rounded-lg border text-[9.5px] font-mono font-medium transition cursor-pointer ${isDarkMode ? "bg-neutral-900/50 border-neutral-800 text-neutral-300 hover:bg-neutral-800" : "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-100"}`}
-                          >
-                            "Fetch collection user-api"
-                          </button>
-                          <button
-                            onClick={() => handleAgentChatSubmit("Generate the Python pytest script for me please")}
-                            className={`py-1.5 px-2 rounded-lg border text-[9.5px] font-mono font-medium transition cursor-pointer ${isDarkMode ? "bg-neutral-900/50 border-neutral-800 text-neutral-300 hover:bg-neutral-800" : "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-100"}`}
-                          >
-                            "Translate user-api to pytest"
-                          </button>
-                          <button
-                            onClick={() => handleAgentChatSubmit("Explain why my tests failed and recommend fixes")}
-                            className={`py-1.5 px-2 rounded-lg border text-[9.5px] font-mono font-medium transition cursor-pointer ${isDarkMode ? "bg-neutral-900/50 border-neutral-800 text-neutral-300 hover:bg-neutral-800" : "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-100"}`}
-                          >
-                            "Analyze run failure log"
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Conversation log stream */}
-                      <div className={`h-80 border ${borderCol} rounded-xl p-3 overflow-y-auto flex flex-col gap-3 max-h-[380px] bg-black/10`}>
-                        {agentChats.map((chat, idx) => (
-                          <div
-                            key={idx}
-                            className={`flex flex-col gap-1 max-w-[90%] ${chat.sender === "user" ? "self-end items-end" : "self-start items-start"}`}
-                          >
-                            <span className="text-[9px] font-mono text-neutral-500">
-                              {chat.sender === "user" ? "User" : "MCP AI QA Agent"} • {new Date(chat.timestamp || Date.now()).toLocaleTimeString()}
-                            </span>
-                            <div className={`px-3 py-2 rounded-xl text-[11px] leading-relaxed ${chat.sender === "user" ? "bg-indigo-500/15 text-indigo-500 border border-indigo-500/20 font-medium font-mono" : isDarkMode ? "bg-neutral-900/60 text-neutral-100 border border-neutral-800" : "bg-white text-neutral-800 border border-neutral-200"}`}>
-                              
-                              {/* Direct user text or response */}
-                              {chat.text && <p className="whitespace-pre-wrap">{chat.text}</p>}
-                              {chat.finalResponse && <p className="whitespace-pre-wrap font-sans">{chat.finalResponse}</p>}
-
-                              {/* Telemetry traces nested inside Agent Responses to expose exact tool-calling choices */}
-                              {chat.toolCalled && (
-                                <div className="mt-2.5 p-2 bg-neutral-950/80 rounded-lg border border-neutral-800/80 text-[10px] font-mono text-neutral-300 flex flex-col gap-1.5 leading-normal">
-                                  <div className="flex items-center gap-1.5 text-indigo-500 font-bold text-[9px] uppercase tracking-wider">
-                                    <Cpu className="h-3 w-3 text-indigo-500 animate-pulse" />
-                                    Agent Tool Execution Log
-                                  </div>
-                                  <div>
-                                    <span className="text-neutral-500 text-[9px]">Decision Thought:</span>
-                                    <p className="text-neutral-300 text-[10px] italic font-light mt-0.5">"{chat.thought}"</p>
-                                  </div>
-                                  <div>
-                                    <span className="text-neutral-500 text-[9px]">Tool Selected:</span> <strong className="text-indigo-500">{chat.toolCalled}</strong>
-                                  </div>
-                                  <div>
-                                    <span className="text-neutral-500 text-[9px]">Resolved Args:</span>
-                                    <pre className="text-[9px] text-[#55ea46] mt-0.5 bg-black/40 p-1 rounded overflow-x-auto">{JSON.stringify(chat.toolArguments, null, 2)}</pre>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-
-                        {mcpIsAgentThinking && (
-                          <div className="self-start flex flex-col gap-1.5">
-                            <span className="text-[9px] font-mono text-neutral-500 flex items-center gap-1">
-                              <RefreshCw className="h-2.5 w-2.5 animate-spin text-emerald-500" />
-                              Agent thinking and selecting tools...
-                            </span>
-                            <div className={`px-4 py-2 bg-neutral-900/30 border border-neutral-800 rounded-xl max-w-[80%] flex items-center gap-2`}>
-                              <div className="flex gap-1">
-                                <span className="h-1.5 w-1.5 bg-emerald-500 rounded-full animate-bounce"></span>
-                                <span className="h-1.5 w-1.5 bg-emerald-500 rounded-full animate-bounce delay-150"></span>
-                                <span className="h-1.5 w-1.5 bg-emerald-500 rounded-full animate-bounce delay-300"></span>
-                              </div>
-                              <span className="text-[10px] font-mono text-neutral-400">Consulting local MCP schema registry...</span>
+                              <button
+                                onClick={handleDownloadZip}
+                                disabled={modularFiles.length === 0}
+                                className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-mono text-xs font-bold rounded-lg transition cursor-pointer"
+                              >
+                                Download pytest_modular_suite.zip
+                              </button>
                             </div>
                           </div>
                         )}
                       </div>
-
-                      {/* Chat chat bar */}
-                      <form
-                        onSubmit={(e) => { e.preventDefault(); handleAgentChatSubmit(); }}
-                        className="flex gap-2"
-                      >
-                        <input
-                          type="text"
-                          value={mcpAgentInput}
-                          onChange={(e) => setMcpAgentInput(e.target.value)}
-                          placeholder="Ask Agent to call 'analyze_failure'..."
-                          className={`flex-grow py-2 px-3 border rounded-xl text-xs font-mono placeholder:text-neutral-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 ${selectStyle}`}
-                        />
-                        <button
-                          type="submit"
-                          disabled={mcpIsAgentThinking || !mcpAgentInput.trim()}
-                          className="bg-indigo-600 hover:bg-indigo-700 font-bold font-mono px-4 py-2 text-white rounded-xl text-xs flex items-center gap-1.5 transition uppercase cursor-pointer"
-                        >
-                          <Send className="h-3 w-3" />
-                          Send
-                        </button>
-                      </form>
-
                     </div>
-
-                    {/* Protocol Server Log Stream */}
-                    <div className={`p-5 md:p-6 border ${borderCol} rounded-2xl ${bgAccent} flex flex-col gap-4 shadow-sm`}>
-                      <div className="flex justify-between items-center border-b border-neutral-800/20 pb-2.5">
-                        <div>
-                          <h4 className="text-xs font-bold font-mono tracking-wider uppercase text-indigo-500 flex items-center gap-1.5">
-                            <Activity className="h-4 w-4" />
-                            Live Invocations logs
-                          </h4>
-                          <p className="text-[10px] text-neutral-500 font-light mt-0.5 leading-normal font-sans">
-                            Chronological history of JSON-RPC schema calls intercepted by the server.
+                  ) : (
+                    /* DELEGATED: CORPORATE PROJECTS GRID DIRECTORY */
+                    <div className="space-y-4">
+                      {projectTab !== "collection" && projectTab !== "ai" && projectTab !== "pytest" && projectTab !== "execution" && (
+                        <div className={`p-5 rounded-xl border ${borderCol} ${bgAccent} border-l-4 border-l-indigo-600 text-left`}>
+                          <h4 className={`font-bold text-xs ${textTitle} mt-0`}>Team projects folder directory</h4>
+                          <p className="text-[10.5px] text-neutral-500 mt-1 max-w-xl leading-relaxed font-sans">
+                            We managed and synchronized all migration workspaces under Supabase corporate schemas. Select a workspace to configure endpoint structures and generate modules.
                           </p>
                         </div>
-                        <span className="text-[9px] text-indigo-500 bg-indigo-500/10 px-2 py-0.5 rounded font-mono font-black uppercase">Intercepting</span>
-                      </div>
+                      )}
 
-                      <div className="flex flex-col gap-2 max-h-56 overflow-y-auto">
-                        {mcpLogs.length === 0 ? (
-                          <div className="text-center py-6 text-neutral-500 font-mono text-[9px] italic">No active server invocations logged yet. Execute a sandbox tool to monitor live triggers!</div>
-                        ) : (
-                          mcpLogs.map((log) => (
-                            <div
-                              key={log.id}
-                              className={`p-2.5 rounded-lg border font-mono text-[9.5px]/relaxed leading-normal ${log.status === "error" ? "bg-rose-500/5 border-rose-500/10 text-rose-400" : isDarkMode ? "bg-neutral-900/40 border-neutral-800 text-neutral-300" : "bg-white border-neutral-200 text-neutral-700"}`}
-                            >
-                              <div className="flex justify-between items-center border-b border-neutral-800/10 pb-1 mb-1.5 text-[8.5px]">
-                                <span className={`font-bold uppercase ${log.status === "error" ? "text-rose-500" : "text-emerald-500"}`}>
-                                  {log.status === "error" ? "✗ RPC Error" : "✓ RPC Success"}
-                                </span>
-                                <span className="text-neutral-500">
-                                  {new Date(log.timestamp).toLocaleTimeString()}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-neutral-500">Method called:</span> <strong className={isDarkMode ? "text-neutral-100" : "text-neutral-900"}>{log.toolName}</strong>
-                              </div>
-                              <details className="mt-1">
-                                <summary className="cursor-pointer text-[8.5px] text-indigo-500 font-semibold hover:underline">Show log transaction envelope</summary>
-                                <pre className="text-[8.5px] text-neutral-400 mt-1.5 bg-black/35 p-1 rounded max-h-16 overflow-y-auto select-all whitespace-pre-wrap">{JSON.stringify({ arguments: log.arguments, response: log.response }, null, 2)}</pre>
-                              </details>
+                      {projectTab === "collection" && (
+                        <div className="space-y-5 animate-fadeIn">
+                          <div className="p-5 rounded-xl border border-indigo-500/20 bg-indigo-505/5 text-left flex gap-4">
+                            <div className="p-3 bg-indigo-500/15 rounded-xl text-indigo-400 shrink-0 self-start animate-bounce">
+                              <Sparkles className="h-5 w-5 animate-pulse" />
                             </div>
-                          ))
-                        )}
-                      </div>
+                            <div className="space-y-1 text-left">
+                              <span className="text-[9px] font-mono font-bold tracking-widest text-indigo-450 uppercase">Pre-Sandbox Quick Importer</span>
+                              <h4 className={`text-sm font-bold ${textTitle} mt-0.5`}>Quick Import &amp; Initialize Workspace</h4>
+                              <p className="text-[11.5px] text-neutral-400 font-sans leading-relaxed">
+                                Upload your Postman Collection <strong>.json</strong>, click a quick-start <strong>sample</strong>, or connect to <strong>Postman Cloud</strong> below. We will instantly set up a brand new workspace environment registry and load your API endpoints!
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className={`p-6 rounded-xl border ${borderCol} ${bgAccent}`}>
+                            <CollectionsPanel
+                              isDarkMode={isDarkMode}
+                              borderCol={borderCol}
+                              bgAccent={bgAccent}
+                              textTitle={textTitle}
+                              textMuted={textMuted}
+                              collectionSource={collectionSource}
+                              setCollectionSource={setCollectionSource}
+                              dragOver={dragOver}
+                              handleDragOver={handleDragOver}
+                              handleDragLeave={handleDragLeave}
+                              handleDrop={handleDrop}
+                              handleFileChange={handleFileChange}
+                              fileInputRef={fileInputRef}
+                              postmanApiKey={postmanApiKey}
+                              setPostmanApiKey={setPostmanApiKey}
+                              isPostmanKeyLoading={isPostmanKeyLoading}
+                              handleConnectPostman={handleConnectPostman}
+                              workspaces={workspaces}
+                              selectedWorkspace={selectedWorkspace}
+                              handleWorkspaceChange={handleWorkspaceChange}
+                              collections={collections}
+                              searchQuery={searchQuery}
+                              setSearchQuery={setSearchQuery}
+                              isCollectionsLoading={isCollectionsLoading}
+                              selectedCollectionUid={selectedCollectionUid}
+                              handleSelectPostmanCollection={handleSelectPostmanCollection}
+                              sampleCollections={sampleCollections}
+                              handleSelectSample={handleSelectSample}
+                              collectionItems={collectionItems}
+                              selectedRequestIndex={selectedRequestIndex}
+                              setSelectedRequestIndex={setSelectedRequestIndex}
+                              reqActiveTab={reqActiveTab}
+                              setReqActiveTab={setReqActiveTab}
+                              HighlightJsExpression={HighlightJsExpression}
+                              handleMigrate={handleMigrate}
+                              isMigrating={isMigrating}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {projectTab === "ai" && (
+                        <div className="p-5 rounded-xl border border-indigo-500/20 bg-indigo-500/5 text-left flex gap-4 animate-fadeIn">
+                          <div className="p-3 bg-indigo-500/10 rounded-xl text-indigo-400 shrink-0 self-start animate-pulse">
+                            <Sparkles className="h-5 w-5" />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-[9px] font-mono font-bold tracking-widest text-indigo-400 uppercase">AI Diagnostics Engine</span>
+                            <h4 className={`text-sm font-bold ${textTitle} mt-0.5`}>Select a Workspace to Enable AI Failure Analysis</h4>
+                            <p className="text-[11px] text-neutral-400 font-sans leading-relaxed">
+                              The <strong>AI Analysis &amp; Chat Suite</strong> runs deep Abstract Syntax Tree (AST) parsing and assertion diagnostics on live test files. To proceed, please select an active workspace environment registry compiled below.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      {projectTab === "pytest" && (
+                        <div className="p-5 rounded-xl border border-blue-500/20 bg-blue-500/5 text-left flex gap-4 animate-fadeIn">
+                          <div className="p-3 bg-blue-500/10 rounded-xl text-blue-400 shrink-0 self-start">
+                            <Code className="h-5 w-5" />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-[9px] font-mono font-bold tracking-widest text-blue-400 uppercase">Compiled Pytest Codes</span>
+                            <h4 className={`text-sm font-bold ${textTitle} mt-0.5`}>Activate a Workspace to View Transpiled Test Code</h4>
+                            <p className="text-[11px] text-neutral-400 font-sans leading-relaxed">
+                              Choose a target automation workspace card below to view its translated pytest classes, assertion validations, and environment custom fixtures.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      {projectTab === "execution" && (
+                        <div className="p-5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 text-left flex gap-4 animate-fadeIn">
+                          <div className="p-3 bg-emerald-500/10 rounded-xl text-emerald-400 shrink-0 self-start">
+                            <Play className="h-5 w-5" />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-[9px] font-mono font-bold tracking-widest text-emerald-400 uppercase">Sandbox Pytest VM</span>
+                            <h4 className={`text-sm font-bold ${textTitle} mt-0.5`}>Open a Workspace to Run Cloud Assertion Suites</h4>
+                            <p className="text-[11px] text-neutral-400 font-sans leading-relaxed">
+                              The <strong>Execution Center</strong> runs real python tests in a secure sandbox VM. To trigger test executes and receive live logs, select a workspace target listed below.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      <MyProjectsDashboard
+                        isDarkMode={isDarkMode}
+                        authToken={session?.access_token || ""}
+                        activeProjectId={activeCloudProjectId}
+                        onSelectProject={handleSelectProject}
+                        onProjectDeselect={() => setActiveCloudProjectId(null)}
+                        onCreateNewProject={(pId) => {
+                          setActiveCloudProjectId(pId);
+                          setProjectTab("collection");
+                        }}
+                      />
                     </div>
-
-                  </div>
-
+                  )}
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* SUBTAB CONTENT: ENTERPRISE AUDIT PORTAL */}
-            {activeTab === "audit" && (
-              <div className="space-y-6 animate-fade-in">
-                <div className={`border ${borderCol} rounded-2xl p-5 md:p-6 bg-[#111215]/40 backdrop-blur-md shadow-md`}>
-                  <div className="flex justify-between items-center border-b border-neutral-800/40 pb-3.5 mb-5">
-                    <div className="text-left">
-                      <h2 className={`text-base font-bold font-display flex items-center gap-2 ${textTitle}`}>
-                        <ShieldCheck className="h-5 w-5 text-amber-500 animate-pulse" />
-                        Enterprise Governance & Auditing Workspace
-                      </h2>
-                      <p className="text-xs text-neutral-500 font-light mt-0.5">
-                        Multi-tenant directory settings, encrypted security logs, and live LLM tool activity trackers.
+
+
+              {/* PAGE 5: AUDIT CENTER (ADMIN ONLY) */}
+              {currentPage === "audit_center" && isAdmin && (
+                <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} space-y-4 animate-fadeIn`}>
+                  <div className="flex items-center gap-2.5 pb-2 border-b border-neutral-800/10 dark:border-neutral-800/40 text-left animate-fadeIn">
+                    <div className="p-2 bg-rose-500/10 text-rose-500 rounded-lg shrink-0">
+                      <ShieldCheck className="h-4.5 w-4.5" />
+                    </div>
+                    <div>
+                      <h4 className={`font-bold ${textTitle} mt-0`}>Corporate compliance security log</h4>
+                      <p className="text-[10.5px] text-neutral-500 mt-0.5 font-sans leading-normal">
+                        Enables tracking of administrative actions, LDAP overrides, and compilation sequences.
                       </p>
                     </div>
                   </div>
-                  
-                  <AdminPortal session={session} isDarkMode={isDarkMode} />
+                  <AdminPortal session={session} isDarkMode={isDarkMode} overrideTab="audit" hideStats={true} />
                 </div>
-              </div>
-            )}
+              )}
+
+              {/* PAGE 6: LOGIN HISTORY (ADMIN ONLY) */}
+              {currentPage === "login_history" && isAdmin && (
+                <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} space-y-4 animate-fadeIn`}>
+                  <div className="flex items-center gap-2.5 pb-2 border-b border-neutral-800/10 dark:border-neutral-800/40 text-left">
+                    <div className="p-2 bg-indigo-500/10 text-indigo-400 rounded-lg shrink-0">
+                      <History className="h-4.5 w-4.5" />
+                    </div>
+                    <div>
+                      <h4 className={`font-bold ${textTitle} mt-0`}>LDAP Team Login Sessions</h4>
+                      <p className="text-[10.5px] text-neutral-505 mt-0.5 font-sans leading-normal">
+                        Active directory logins, IP credentials, duration mappings, and corporate status logs.
+                      </p>
+                    </div>
+                  </div>
+                  <AdminPortal session={session} isDarkMode={isDarkMode} overrideTab="login" hideStats={true} />
+                </div>
+              )}
+
+              {/* PAGE 7: USER MANAGEMENT (ADMIN ONLY) */}
+              {currentPage === "user_management" && isAdmin && (
+                <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} space-y-4 animate-fadeIn`}>
+                  <div className="flex items-center gap-2.5 pb-2 border-b border-neutral-800/10 dark:border-neutral-800/40 text-left">
+                    <div className="p-2 bg-emerald-500/10 text-emerald-450 rounded-lg shrink-0">
+                      <Users className="h-4.5 w-4.5" />
+                    </div>
+                    <div>
+                      <h4 className={`font-bold ${textTitle} mt-0`}>Employee and Teammate Directory</h4>
+                      <p className="text-[10.5px] text-neutral-500 mt-0.5 font-sans leading-normal">
+                        Edit security permissions, set roles, enable or disable LDAP corporate profiles.
+                      </p>
+                    </div>
+                  </div>
+                  <AdminPortal session={session} isDarkMode={isDarkMode} overrideTab="users" hideStats={true} />
+                </div>
+              )}
 
 
-            {/* AI Prompts and Pipeline Logs Metadata (Trace logs at bottom) */}
-            {aiPromptMeta && activeTab === "consolidated" && (
-              <div className={`${isDarkMode ? "bg-[#121314] text-[#a9b2c3] border-neutral-800/80" : "bg-neutral-100 text-neutral-600 border-neutral-200"} rounded-xl p-4.5 text-[10px] leading-relaxed font-mono border mt-1`}>
-                <div className={`font-bold uppercase ${isDarkMode ? "text-neutral-100" : "text-neutral-800"} tracking-wider mb-2 flex items-center gap-2`}>
-                  <Activity className="h-4 w-4 text-emerald-500" />
-                  AST Conversion Telemetry logs
-                </div>
-                <div className={`grid grid-cols-1 md:grid-cols-2 gap-2 border-b ${isDarkMode ? "border-neutral-800 pb-2.5 mb-2.5 text-neutral-500" : "border-neutral-200 pb-2.5 mb-2.5 text-neutral-500"}`}>
-                  <div>LLM Engine: <span className={isDarkMode ? "text-neutral-300" : "text-neutral-700"}>gemini-3.5-flash-pro</span></div>
-                  <div>Timestamp: <span className={isDarkMode ? "text-neutral-300" : "text-neutral-700"}>{aiPromptMeta.timestamp}</span></div>
-                </div>
-                <details className="cursor-pointer">
-                  <summary className="text-indigo-500 font-semibold hover:underline">View Mapping System Directives</summary>
-                  <pre className={`mt-2 text-[9px] p-2 rounded max-h-24 overflow-y-auto border whitespace-pre-wrap ${
-                    isDarkMode 
-                      ? "bg-neutral-950 text-neutral-500 border-neutral-900" 
-                      : "bg-white text-neutral-600 border-neutral-200"
-                  }`}>
-                    {aiPromptMeta.systemInstruction}
-                  </pre>
-                </details>
-              </div>
-            )}
 
-          </div>
+              {/* PAGE 9: PROFILE VIEW */}
+              {currentPage === "profile" && (
+                <div className="max-w-2xl mx-auto space-y-5 py-6 animate-fadeIn w-full">
+                  <div className={`p-6 rounded-2xl border ${borderCol} ${bgAccent} text-left relative overflow-hidden flex flex-col gap-5`}>
+                    <div className="absolute right-0 top-0 h-24 w-24 bg-indigo-500/10 blur-2xl rounded-full"></div>
+                    <div className="flex items-center gap-3">
+                      <div className="h-12 w-12 rounded-xl bg-indigo-600/10 border border-indigo-500/20 flex items-center justify-center text-lg font-bold font-mono text-indigo-400 shrink-0">
+                        {userRole === "Admin" ? "AD" : "ST"}
+                      </div>
+                      <div className="text-left">
+                        <h3 className={`text-base font-bold ${textTitle} mt-0`}>Enterprise Account profile</h3>
+                        <p className="text-xs text-neutral-500 leading-normal">Corporate Single Sign-On synchronized directory account parameters.</p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 text-xs font-mono border-t border-b border-neutral-800/10 dark:border-neutral-800/30 py-4 mt-2">
+                      <div className="text-left">
+                        <span className="text-[9px] uppercase tracking-wider text-neutral-500 block mb-0.5">Account email</span>
+                        <span className="text-neutral-300 font-bold truncate block">{session?.user?.email}</span>
+                      </div>
+                      <div className="text-left">
+                        <span className="text-[9px] uppercase tracking-wider text-neutral-500 block mb-0.5 text-left">Corporate Role Assignment</span>
+                        <span className="px-2 py-0.5 rounded bg-indigo-600/10 text-indigo-400 text-[10px] w-fit font-bold uppercase border border-indigo-505/15 block" style={{width: 'fit-content'}}>
+                          {userRole}
+                        </span>
+                      </div>
+                      <div className="text-left">
+                        <span className="text-[9px] uppercase tracking-wider text-neutral-500 block mb-0.5">Unique Employee ID</span>
+                        <span className="text-neutral-300 block">EMP-{session?.user?.id?.substring(0, 8).toUpperCase() || "RESERVED"}</span>
+                      </div>
+                      <div className="text-left">
+                        <span className="text-[9px] uppercase tracking-wider text-neutral-500 block mb-0.5 font-bold">LDAP Server gatekeeper</span>
+                        <span className="text-emerald-500 block">✓ Active & compliant</span>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2.5 pt-2">
+                      <button
+                        onClick={() => setIsChangePasswordModalOpen(true)}
+                        className="py-2 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs font-mono uppercase cursor-pointer transition shadow animate-fadeIn"
+                      >
+                        Modify security credentials
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* PAGE 10: SETTINGS */}
+              {currentPage === "settings" && (
+                <div className="max-w-2xl mx-auto space-y-6 text-left py-6 w-full">
+                  {/* Reuse SettingsPanel completely */}
+                  <div className={`p-6 rounded-2xl border ${borderCol} ${bgAccent} space-y-4`}>
+                    <div className="text-left">
+                      <h3 className={`text-sm md:text-base font-bold ${textTitle} mt-0`}>General Workspace Settings</h3>
+                      <p className="text-xs text-neutral-500 leading-normal font-sans text-left">Configure global Python compiler target directives, custom API secret overrides, and display modes.</p>
+                    </div>
+
+                    <SettingsPanel
+                      borderCol={borderCol}
+                      bgAccent={bgAccent}
+                      textTitle={textTitle}
+                      customApiKey={customApiKey}
+                      setCustomApiKey={setCustomApiKey}
+                      library={library}
+                      setLibrary={setLibrary}
+                      baseUrlEnv={baseUrlEnv}
+                      setBaseUrlEnv={setBaseUrlEnv}
+                      injectBaseUrlFixture={injectBaseUrlFixture}
+                      setInjectBaseUrlFixture={setInjectBaseUrlFixture}
+                      addComments={addComments}
+                      setAddComments={setAddComments}
+                      isDarkMode={isDarkMode}
+                    />
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          </AnimatePresence>
         </main>
+
+        {/* Compact Fine-Type Page Footer */}
+        <footer className={`border-t ${borderCol} ${isDarkMode ? "bg-[#111215]" : "bg-[#fbfbfa]"} py-4.5 px-6 text-center text-xs text-neutral-500 font-light mt-auto transition-colors`}>
+          <div className="max-w-8xl mx-auto flex flex-col md:flex-row justify-between items-center gap-3.5 animate-fadeIn">
+            <p>© 2026 Pytestify Studio Inc. Designed in alignment with premium API product specifications.</p>
+            <div className="flex items-center gap-4 font-mono text-[9px] text-neutral-600">
+              <span>PLATFORM: PORT 3000 DEV_INGRESS</span>
+              <span className="hidden md:inline">|</span>
+              <span>PRO_MIGRATOR STATUS: ONLINE</span>
+            </div>
+          </div>
+        </footer>
       </div>
 
-      {/* Modern Compact Fine-Type Footer */}
-      <footer className={`border-t ${borderCol} ${isDarkMode ? "bg-[#111215]" : "bg-[#fbfbfa]"} py-4 px-6 text-center text-xs text-neutral-500 font-light mt-auto transition-colors`}>
-        <div className="max-w-8xl mx-auto flex flex-col md:flex-row justify-between items-center gap-3.5">
-          <p>© 2026 Pytestify Studio Inc. Designed in alignment with premium API product specifications.</p>
-          <div className="flex items-center gap-4 font-mono text-[10px] text-neutral-600">
-            <span>PLATFORM: PORT 3000 DEV_INGRESS</span>
-            <span className="hidden md:inline">|</span>
-            <span>PRO_MIGRATOR STATUS: ONLINE</span>
-          </div>
-        </div>
-      </footer>
-
-      {/* Auth Modal overlay */}
+      {/* --- Auth Modal Overlay --- */}
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
@@ -2730,7 +2378,7 @@ export default function App() {
         onAuthSuccess={(newSession) => setSession(newSession)}
       />
 
-      {/* Change Password Modal overlay */}
+      {/* --- Change Password Modal Overlay --- */}
       <ChangePasswordModal
         isOpen={isChangePasswordModalOpen}
         onClose={() => setIsChangePasswordModalOpen(false)}

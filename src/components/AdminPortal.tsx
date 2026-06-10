@@ -4,10 +4,19 @@ import { Users, FileSpreadsheet, History, BarChart3, ShieldAlert, Check, X, Refr
 interface AdminPortalProps {
   session: any;
   isDarkMode: boolean;
+  overrideTab?: "users" | "audit" | "login" | "mcp";
+  hideStats?: boolean;
 }
 
-export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
-  const [activeSubTab, setActiveSubTab] = useState<"users" | "audit" | "login" | "mcp">("users");
+export default function AdminPortal({ session, isDarkMode, overrideTab, hideStats }: AdminPortalProps) {
+  const [activeSubTab, setActiveSubTab] = useState<"users" | "audit" | "login" | "mcp">(overrideTab || "users");
+  
+  // Keep tab state synchronized with the prop if it changes
+  useEffect(() => {
+    if (overrideTab) {
+      setActiveSubTab(overrideTab);
+    }
+  }, [overrideTab]);
   const [loading, setLoading] = useState<boolean>(false);
   const [errorText, setErrorText] = useState<string>("");
   const [successText, setSuccessText] = useState<string>("");
@@ -153,7 +162,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
 
   // State for updating a user's role
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
-  const [selectedRole, setSelectedRole] = useState<string>("Developer");
+  const [selectedRole, setSelectedRole] = useState<string>("Staff");
 
   // State for Admin Adding a Member (Creation)
   const [isAddUserOpen, setIsAddUserOpen] = useState(false);
@@ -163,7 +172,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
   const [addEmployeeId, setAddEmployeeId] = useState("");
   const [addDepartment, setAddDepartment] = useState("");
   const [addDesignation, setAddDesignation] = useState("");
-  const [addRole, setAddRole] = useState("Developer");
+  const [addRole, setAddRole] = useState("Staff");
 
   // State for Admin Overriding Password
   const [targetPasswordUserId, setTargetPasswordUserId] = useState<string | null>(null);
@@ -335,7 +344,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
       setAddEmployeeId("");
       setAddDepartment("");
       setAddDesignation("");
-      setAddRole("Developer");
+      setAddRole("Staff");
       loadPortalData();
     } catch (err: any) {
       setErrorText(err.message || "Teammate registration has failed.");
@@ -411,7 +420,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
     }
   };
 
-  // If role is denied access (Developer/Viewer/QA trying to look at global directories)
+  // If role is denied access (Staff trying to look at global directories)
   if (errorText === "CLEARANCE_ERR") {
     return (
       <div className={`p-6 border ${borderCol} rounded-2xl ${bgAccent} shadow-xs flex flex-col items-center justify-center text-center max-w-2xl mx-auto my-12`}>
@@ -422,7 +431,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
           Elevated Operational Clearance Required
         </h3>
         <p className="text-xs text-neutral-400 font-light max-w-md leading-relaxed mb-6">
-          Your current security enrollment is registered as a restricted corporate profile (Developer/QA/Viewer role). Global teammate directories, centralized security audits, and LDAP system logs are restricted to members with active **Admin** or **Manager** credentials.
+          Your current security enrollment is registered as a restricted corporate profile (Staff role). Global teammate directories, centralized security audits, and LDAP system logs are restricted to members with active **Admin** credentials.
         </p>
         <div className="grid grid-cols-2 gap-3 text-left w-full max-w-sm text-[11px] font-mono bg-neutral-900/60 p-4 border border-neutral-800 rounded-lg mb-6">
           <div className="text-neutral-500">CLEARANCE NODE:</div>
@@ -430,10 +439,10 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
           <div className="text-neutral-500">YOUR PROFILE EMAIL:</div>
           <div className="text-neutral-300 truncate">{session.user?.email}</div>
           <div className="text-neutral-500">REQUIRED ROLE:</div>
-          <div className="text-amber-500 font-bold">ADMIN / MANAGER</div>
+          <div className="text-amber-500 font-bold">ADMIN</div>
         </div>
         <p className="text-[10px] text-neutral-500">
-          Try registering a new account and select the **Admin** or **Manager** role mapping dropdown to inspect this view!
+          Try registering a new account and select the **Admin** role mapping dropdown to inspect this view!
         </p>
       </div>
     );
@@ -443,94 +452,92 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
     <div className="space-y-6">
       
       {/* Enterprise Statistics Cards Row */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3.5">
-        <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
-          <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Teammates</span>
-          <span className={`text-2xl font-extrabold font-mono mt-1 ${textTitle}`}>{stats.totalUsers}</span>
-          <span className="text-[9px] text-emerald-400 font-mono mt-1 flex items-center gap-0.5">
-            <ArrowUpRight className="h-3 w-3" /> Sync Active
-          </span>
+      {!hideStats && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
+          <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
+            <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Teammates</span>
+            <span className={`text-2xl font-extrabold font-mono mt-1 ${textTitle}`}>{stats.totalUsers}</span>
+            <span className="text-[9px] text-emerald-400 font-mono mt-1 flex items-center gap-0.5">
+              <ArrowUpRight className="h-3 w-3" /> Sync Active
+            </span>
+          </div>
+          
+          <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
+            <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Active Sessions</span>
+            <span className={`text-2xl font-extrabold font-mono mt-1 ${textTitle}`}>{stats.activeSubscribers}</span>
+            <span className="text-[9px] text-indigo-400 font-mono mt-1 flex items-center gap-0.5">
+              ● Realtime Connection
+            </span>
+          </div>
+
+          <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
+            <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Project Indexes</span>
+            <span className={`text-2xl font-extrabold font-mono mt-1 ${textTitle}`}>{stats.totalProjects}</span>
+            <span className="text-[9px] text-neutral-400 font-mono mt-1">Stored Stably</span>
+          </div>
+
+          <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
+            <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Avg Gen Delay</span>
+            <span className={`text-2xl font-extrabold font-mono mt-1 text-emerald-400`}>{stats.averageExecutionTime ? `${stats.averageExecutionTime}s` : "0.5s"}</span>
+            <span className="text-[9px] text-neutral-400 font-mono mt-1">LLM Fallback Armed</span>
+          </div>
         </div>
-        
-        <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
-          <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Active Sessions</span>
-          <span className={`text-2xl font-extrabold font-mono mt-1 ${textTitle}`}>{stats.activeSubscribers}</span>
-          <span className="text-[9px] text-indigo-400 font-mono mt-1 flex items-center gap-0.5">
-            ● Realtime Connection
-          </span>
+      )}
+
+      {/* Admin Module Subtabs (Only visible when no overrideTab is specified) */}
+      {!overrideTab && (
+        <div className="flex border-b border-neutral-800/40 text-xs overflow-x-auto gap-2 font-mono py-1">
+          <button
+            onClick={() => setActiveSubTab("users")}
+            className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
+              activeSubTab === "users" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
+            }`}
+          >
+            <Users className="h-4 w-4" />
+            Teammate Directory ({users.length})
+          </button>
+
+          <button
+            onClick={() => setActiveSubTab("audit")}
+            className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
+              activeSubTab === "audit" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
+            }`}
+          >
+            <FileSpreadsheet className="h-4 w-4" />
+            Security Audit Trail ({auditLogs.length})
+          </button>
+
+          <button
+            onClick={() => setActiveSubTab("login")}
+            className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
+              activeSubTab === "login" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
+            }`}
+          >
+            <History className="h-4 w-4" />
+            LDAP Login History ({loginHistory.length})
+          </button>
+
+          <button
+            onClick={() => setActiveSubTab("mcp")}
+            className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
+              activeSubTab === "mcp" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
+            }`}
+          >
+            <Cpu className="h-4 w-4" />
+            MCP Tool activity ({mcpLogs.length})
+          </button>
+
+          <button
+            onClick={loadPortalData}
+            disabled={loading}
+            className="ml-auto py-1.5 px-3 rounded-lg border border-neutral-800 text-neutral-400 hover:bg-neutral-900 transition flex items-center gap-1 text-[11px]"
+            title="Force Sync Directory"
+          >
+            <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+            Sync
+          </button>
         </div>
-
-        <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
-          <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Project Indexes</span>
-          <span className={`text-2xl font-extrabold font-mono mt-1 ${textTitle}`}>{stats.totalProjects}</span>
-          <span className="text-[9px] text-neutral-400 font-mono mt-1">Stored Stably</span>
-        </div>
-
-        <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col`}>
-          <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Telemetry Uptime</span>
-          <span className={`text-2xl font-extrabold font-mono mt-1 ${textTitle}`}>99.98%</span>
-          <span className="text-[9px] text-emerald-400 font-mono mt-1">✓ Core Healthy</span>
-        </div>
-
-        <div className={`p-4 rounded-xl border ${borderCol} ${bgAccent} flex flex-col col-span-2 md:col-span-1`}>
-          <span className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider font-semibold">Avg Gen Delay</span>
-          <span className={`text-2xl font-extrabold font-mono mt-1 text-emerald-400`}>{stats.averageExecutionTime ? `${stats.averageExecutionTime}s` : "0.5s"}</span>
-          <span className="text-[9px] text-neutral-400 font-mono mt-1">LLM Fallback Armed</span>
-        </div>
-      </div>
-
-      {/* Admin Module Subtabs */}
-      <div className="flex border-b border-neutral-800/40 text-xs overflow-x-auto gap-2 font-mono py-1">
-        <button
-          onClick={() => setActiveSubTab("users")}
-          className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-            activeSubTab === "users" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
-          }`}
-        >
-          <Users className="h-4 w-4" />
-          Teammate Directory ({users.length})
-        </button>
-
-        <button
-          onClick={() => setActiveSubTab("audit")}
-          className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-            activeSubTab === "audit" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
-          }`}
-        >
-          <FileSpreadsheet className="h-4 w-4" />
-          Security Audit Trail ({auditLogs.length})
-        </button>
-
-        <button
-          onClick={() => setActiveSubTab("login")}
-          className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-            activeSubTab === "login" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
-          }`}
-        >
-          <History className="h-4 w-4" />
-          LDAP Login History ({loginHistory.length})
-        </button>
-
-        <button
-          onClick={() => setActiveSubTab("mcp")}
-          className={`py-2 px-3 border-b-2 transition whitespace-nowrap flex items-center gap-1.5 ${
-            activeSubTab === "mcp" ? "border-indigo-500 text-indigo-400 font-bold" : "border-transparent text-neutral-500 hover:text-neutral-300"
-          }`}
-        >
-          <Cpu className="h-4 w-4" />
-          MCP Tool activity ({mcpLogs.length})
-        </button>
-
-        <button
-          onClick={loadPortalData}
-          disabled={loading}
-          className="ml-auto py-1.5 px-3 rounded-lg border border-neutral-800 text-neutral-400 hover:bg-neutral-900 transition flex items-center gap-1 text-[11px]"
-          title="Force Sync Directory"
-        >
-          <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
-          Sync
-        </button>
-      </div>
+      )}
 
       {/* Filters and Utilities Bar */}
       {(activeSubTab === "audit" || activeSubTab === "login" || activeSubTab === "mcp") && (
@@ -692,11 +699,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
                               className="w-full text-xs px-2 py-1.5 bg-[#101113] border border-neutral-850 text-white rounded focus:outline-none focus:border-indigo-500 font-mono"
                             >
                               <option value="Staff">Staff</option>
-                              <option value="Developer">Developer</option>
-                              <option value="QA Engineer">QA Engineer</option>
-                              <option value="Manager">Manager</option>
                               <option value="Admin">Admin</option>
-                              <option value="Viewer">Viewer</option>
                             </select>
                           </div>
 
@@ -819,10 +822,7 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
                                       onChange={e => setSelectedRole(e.target.value)}
                                       className="text-xs p-1 rounded border-neutral-700 bg-neutral-900 text-white"
                                     >
-                                      <option value="Viewer">Viewer</option>
-                                      <option value="Developer">Developer</option>
-                                      <option value="QA Engineer">QA Engineer</option>
-                                      <option value="Manager">Manager</option>
+                                      <option value="Staff">Staff</option>
                                       <option value="Admin">Admin</option>
                                     </select>
                                     <button
@@ -843,15 +843,12 @@ export default function AdminPortal({ session, isDarkMode }: AdminPortalProps) {
                                   <div className="flex items-center gap-1.5">
                                     <span className={`px-2 py-0.5 rounded font-bold text-[9.5px] tracking-wider ${
                                       u.role === "Admin" ? "bg-amber-500/10 text-amber-500 border border-amber-500/20" :
-                                      u.role === "Manager" ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20" :
-                                      u.role === "QA Engineer" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" :
-                                      u.role === "Viewer" ? "bg-neutral-800 text-neutral-400" :
                                       "bg-indigo-500/5 text-neutral-300 border border-neutral-800"
                                     }`}>
-                                      {u.role || "Developer"}
+                                      {u.role || "Staff"}
                                     </span>
                                     <button
-                                      onClick={() => { setEditingUserId(u.id); setSelectedRole(u.role || "Developer"); }}
+                                      onClick={() => { setEditingUserId(u.id); setSelectedRole(u.role || "Staff"); }}
                                       className="text-[10px] text-indigo-400 hover:underline cursor-pointer"
                                     >
                                       Edit
