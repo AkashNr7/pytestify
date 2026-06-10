@@ -1,5 +1,5 @@
 {
-  "name": "Remix: Postman to Pytest Migrator",
+  "name": "Remix: Remix: Remix: Postman to Pytest Migrator",
   "description": "Migrate Postman Collection JSON requests and their JavaScript test assertions into clean, idiomatic Python pytest functions using Gemini AI.",
   "requestFramePermissions": [],
   "majorCapabilities": [
